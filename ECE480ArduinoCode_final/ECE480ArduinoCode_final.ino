@@ -52,7 +52,9 @@ void setup() {
 void loop() {
   if(Serial.available()) {
     char val = Serial.read(); // looking for byte sent from Processing IDE
+    
 
+    
     if(val == '0') {
         myServo.setPWM(0,0,2000); // 2000 is the slow speed setting on pin 0
     }
@@ -279,7 +281,10 @@ void loop() {
     {
     myServo.setPWM(0,0,0);
   delay(1);
+  myServo.setPWM(1,0,1000);
+  delay(3000);
   myServo.setPWM(1,0,0);
+  delay(3000);
   delay(1);
   myServo.setPWM(2, 0, 0);
   delay(1);
