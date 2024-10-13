@@ -1,31 +1,45 @@
-const int sensor1A0 = A0;
-const int sensor1A1 = A1;
-const int sensor2A0 = A2;
-const int sensor2A1 = A3;
+const int NUM_SENSORS = 16;
+const int SENSORS_PER_BOARD = 2;
+const int NUM_BOARDS = NUM_SENSORS / SENSORS_PER_BOARD;
 
+// Define an array to store all sensor pins
+const int sensorPins[NUM_SENSORS][SENSORS_PER_BOARD] = {
+  {A0, A1}, {A2, A3}, {A4, A5}, {A6, A7},
+  {A8, A9}, {A10, A11}, {A12, A13}, {A14, A15},
+  {A0, A1}, {A2, A3}, {A4, A5}, {A6, A7},
+  {A8, A9}, {A10, A11}, {A12, A13}, {A14, A15}
+};
 
 void setup() {
-   Serial.begin(9600);
+  Serial.begin(115200);  // Increased baud rate for faster data transmission(change it both in here and the python script if you do change it)
 }
 
-  void loop() {
-    // put your main code here, to run repeatedly:
-    // bool change = false;
-    // static uint32_t t = millis();
-    int sensor1ValueA0 = analogRead(sensor1A0);
-    int sensor1ValueA1 = analogRead(sensor1A1);
-    int sensor2ValueA0 = analogRead(sensor2A0);
-    int sensor2ValueA1 = analogRead(sensor2A1);
-    // Send data to the serial port
-    Serial.print("S1A0:");
-    Serial.print(sensor1ValueA0);
-    Serial.print(",S1A1:");
-    Serial.print(sensor1ValueA1);
-    Serial.print(",S2A0:");
-    Serial.print(sensor2ValueA0);
-    Serial.print(",S2A1:");
-    Serial.println(sensor2ValueA1);   
+void loop() {
+  unsigned long timestamp = millis();
+  
+  // Start of data packet
+  Serial.print("START,");
+  Serial.print(timestamp);
+  Serial.print(",");
 
-    delay(200);
-    
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    for (int j = 0; j < SENSORS_PER_BOARD; j++) {
+      int sensorValue = analogRead(sensorPins[i][j]);
+      
+      Serial.print("S");
+      Serial.print(i + 1);
+      Serial.print("A");
+      Serial.print(j);
+      Serial.print(":");
+      Serial.print(sensorValue);
+      if (i < NUM_SENSORS - 1 || j < SENSORS_PER_BOARD - 1) {
+        Serial.print(",");
+      }
+    }
   }
+  
+  // End of data packet
+  Serial.println(",END");
+  
+  delay(200);
+}
