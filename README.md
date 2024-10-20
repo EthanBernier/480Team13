@@ -22,7 +22,7 @@ graph TD
     A -->|Generate| I[Visualizations]
     A -->|User Input| J[Control Commands]
     
-    J -->|Serial Communication| B
+
     
     K[User Interface] -->|Input| A
     A -->|Display| K
