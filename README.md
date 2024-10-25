@@ -1,10 +1,19 @@
-# How to run the sensor data script
- - First make sure the new sensor code(CommunicationRX_DSK) is flashed to the arduino
- - Next load the python script(in Sensor data processing) as well as its packages
- - In the script change the serial port to be that of the arduino on line 9
- - When ran the script gathers 60 seconds of data change that on line 11 if you want it to run for more or less
- - Open the markdown file in Obsidian after the script is done running
- 
+# How to run Serial tests
+First launch both the gui and whatever test you would like to run
+Second set up some form of virtual serial connection(I used [Virtual  Serial port](https://www.virtual-serial-port.org/))
+## Fans and sprayer
+Connect the tester program to COM2
+Connect the fans controller in the gui to COM1
+Connect the Sensor controller to Something random
+Either Change fan settings or run Sprayer program
+The logs will reflect either running
+## Sensors
+Connect the tester program to COM1
+Connect The sensor controller in the gui to COM2
+Generate Test data in the tester program
+Send Test data in the tester program
+The graphs in the GUI will reflect the data sending properly
+
 ```mermaid
 graph TD
     A[Python Code] -->|Serial Communication| B[Arduino Mega]
