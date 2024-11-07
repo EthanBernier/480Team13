@@ -9,11 +9,12 @@
 #define FANOFF 0
 #define SPRAYER_PIN 4
 
-// Default timing values
-int cycleDuration = 1000;  // Base time cycle in milliseconds (1 second default)
-String sprayPattern = "";  // Will hold the binary pattern
-int currentBitIndex = 0;
-bool isTransmitting = false;
+// Pattern variables
+int cycleDuration = 1000;     // Base time cycle in milliseconds (1 second default)
+String sprayPattern = "";     // Will hold the binary pattern
+int currentBitIndex = 0;      // Current position in pattern
+bool isTransmitting = false;  // Pattern transmission state
+unsigned long lastCycleTime = 0;  // For timing control
 
 Adafruit_PWMServoDriver fanController = Adafruit_PWMServoDriver(0x40);
 
@@ -29,9 +30,16 @@ void loop() {
         String command = Serial.readStringUntil('\n');
         processCommand(command);
     }
-
+    
+    // Process pattern if active
     if (isTransmitting && sprayPattern.length() > 0) {
-        processNextCycle();
+        unsigned long currentTime = millis();
+        
+        // Check if it's time for the next cycle
+        if (currentTime - lastCycleTime >= cycleDuration) {
+            processNextCycle();
+            lastCycleTime = currentTime;  // Reset timing
+        }
     }
 }
 
@@ -48,6 +56,7 @@ void processCommand(String command) {
         sprayPattern = command.substring(comma + 1);
         currentBitIndex = 0;
         isTransmitting = true;
+        lastCycleTime = millis();  // Initialize timing
         Serial.println("Pattern received");
     }
     else if (command.startsWith("STOP")) {
@@ -59,7 +68,6 @@ void processCommand(String command) {
         int comma = command.indexOf(',');
         int fan = command.substring(0, comma).toInt();
         int speed = command.substring(comma + 1).toInt();
-
         if (fan >= 0 && fan < 16) {
             int pwmValue;
             switch(speed) {
@@ -77,28 +85,25 @@ void processCommand(String command) {
 
 void processNextCycle() {
     if (currentBitIndex >= sprayPattern.length()) {
-        stopTransmission();
-        Serial.println("Pattern complete");
-        return;
+        // Reset to start of pattern instead of stopping
+        currentBitIndex = 0;
+        Serial.println("Pattern restarting");
     }
 
     char currentBit = sprayPattern[currentBitIndex];
-
     if (currentBit == '1') {
-        // Spray cycle
         digitalWrite(SPRAYER_PIN, HIGH);
-        delay(cycleDuration);
-        digitalWrite(SPRAYER_PIN, LOW);
+        Serial.print("Spray cycle ");
     } else {
-        // Wait cycle
-        delay(cycleDuration);
+        digitalWrite(SPRAYER_PIN, LOW);
+        Serial.print("Wait cycle ");
     }
-
-    currentBitIndex++;
-    Serial.print("Completed cycle ");
-    Serial.print(currentBitIndex);
+    
+    Serial.print(currentBitIndex + 1);
     Serial.print(" of ");
     Serial.println(sprayPattern.length());
+    
+    currentBitIndex++;
 }
 
 void stopTransmission() {

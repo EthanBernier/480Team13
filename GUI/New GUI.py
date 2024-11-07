@@ -12,7 +12,6 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QPalette
 import pyqtgraph as pg
 import random
-import scipy
 
 FAN_COLORS = {
     'Off': '#FFFFFF',  # White
@@ -114,6 +113,8 @@ class SprayPatternDialog(QDialog):
             'pattern': self.pattern_input.text(),
             'cycle_duration': self.cycle_duration.value()
         }
+
+
 class PortSelectionDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -313,7 +314,7 @@ class SensorArrayGUI(QMainWindow):
 
         # Fan controls
         self.fan_mode = QComboBox()
-        self.fan_mode.addItems(["Random Power" , "Custom", "All On", "All Off"])
+        self.fan_mode.addItems(["Random Power", "Custom", "All On", "All Off"])
         self.fan_mode.currentTextChanged.connect(self.change_fan_mode)
 
         speed_layout = QHBoxLayout()
@@ -434,12 +435,12 @@ class SensorArrayGUI(QMainWindow):
         self.sensor_plots = []
         plot_grid = QGridLayout()
 
-        for i in range(4):
-            for j in range(4):
+        for i in range(2):
+            for j in range(1):
                 # Create plot widget
                 plot_widget = pg.PlotWidget()
                 plot_widget.setBackground('w')
-                plot_widget.setTitle(f'Sensor {i * 4 + j + 1}')
+                plot_widget.setTitle(f'Sensor {i + j + 1}')
                 plot_widget.setLabel('left', 'Value')
                 plot_widget.setLabel('bottom', 'Time (s)')
                 plot_widget.showGrid(x=True, y=True)
@@ -555,12 +556,14 @@ class SensorArrayGUI(QMainWindow):
         except Exception as e:
             self.log_terminal.append(f"Sensor controller connection error: {str(e)}")
             self.sensor_serial = None
+
     def show_port_selection(self):
         """Show port selection dialog and connect to selected ports"""
         dialog = PortSelectionDialog(self)
         if dialog.exec_():
             fan_port, sensor_port, fan_baud, sensor_baud = dialog.get_selected_ports()
             self.connect_devices(fan_port, sensor_port, fan_baud, sensor_baud)
+
     def update_sensor_data(self):
         if not self.sensor_serial:
             return
@@ -568,35 +571,101 @@ class SensorArrayGUI(QMainWindow):
         try:
             if self.sensor_serial.in_waiting:
                 line = self.sensor_serial.readline().decode().strip()
-                if line.startswith("START") and line.endswith("END"):
-                    # Parse sensor data
-                    parts = line.split(',')
-                    timestamp = float(parts[1]) / 1000.0  # Convert to seconds
+                # self.log_terminal.append(f"Raw data: {line}")  # Uncomment for debugging
 
-                    # Process each sensor reading
-                    for i in range(16):
-                        sensor_data = parts[2 + i].split(':')
-                        if len(sensor_data) == 2:
-                            value = float(sensor_data[1])
-                            self.sensor_plots[i]['data']['x'].append(timestamp)
-                            self.sensor_plots[i]['data']['y'].append(value)
+                # Parse "A0:value,A1:value" format
+                try:
+                    # Split into individual sensor readings
+                    readings = line.split(',')
 
-                            # Keep only last 100 readings
-                            if len(self.sensor_plots[i]['data']['x']) > 100:
-                                self.sensor_plots[i]['data']['x'].pop(0)
-                                self.sensor_plots[i]['data']['y'].pop(0)
+                    # Get current timestamp
+                    timestamp = time.time() - self.start_time
 
-                            # Update plot and detection
-                            self.sensor_plots[i]['curve'].setData(
-                                self.sensor_plots[i]['data']['x'],
-                                self.sensor_plots[i]['data']['y']
-                            )
+                    for reading in readings:
+                        if ':' in reading:
+                            sensor, value = reading.split(':')
+                            value = float(value)
 
-                    # Process detection after updating all plots
-                    self.process_current_data()
+                            # Update appropriate plot
+                            if sensor == 'A0':
+                                self.update_plot(0, timestamp, value)
+                            elif sensor == 'A1':
+                                self.update_plot(1, timestamp, value)
+
+                except ValueError as ve:
+                    self.log_terminal.append(f"Value error parsing sensor data: {ve}")
+                except Exception as e:
+                    self.log_terminal.append(f"Error parsing sensor line: {e}")
 
         except Exception as e:
             self.log_terminal.append(f"Sensor data error: {str(e)}")
+
+    def update_plot(self, plot_index, timestamp, value):
+        """Helper function to update a single plot"""
+        try:
+            plot = self.sensor_plots[plot_index]
+
+            plot['data']['x'].append(timestamp)
+            plot['data']['y'].append(value)
+
+            # Keep only last 100 readings
+            while len(plot['data']['x']) > 100:
+                plot['data']['x'].pop(0)
+                plot['data']['y'].pop(0)
+
+            # Update plot
+            plot['curve'].setData(
+                plot['data']['x'],
+                plot['data']['y']
+            )
+
+            # Process peaks and crossings if enabled
+            self.process_plot_data(plot_index)
+
+        except Exception as e:
+            self.log_terminal.append(f"Plot update error: {str(e)}")
+
+    def process_plot_data(self, plot_index):
+        """Process current data for peaks and threshold crossings for a single plot"""
+        try:
+            plot = self.sensor_plots[plot_index]
+            if len(plot['data']['y']) > 1:
+                y_data = np.array(plot['data']['y'])
+                x_data = np.array(plot['data']['x'])
+                threshold = self.threshold_spin.value()
+
+                # Find peaks if enough data points
+                if len(y_data) > self.peak_distance_spin.value():
+                    peaks, _ = find_peaks(y_data,
+                                          height=self.peak_height_spin.value(),
+                                          distance=self.peak_distance_spin.value())
+
+                    # Update peaks scatter plot
+                    if len(peaks) > 0:
+                        plot['peaks_scatter'].setData(
+                            x=x_data[peaks],
+                            y=y_data[peaks]
+                        )
+                    else:
+                        plot['peaks_scatter'].clear()
+
+                    # Find threshold crossings (falling edges)
+                    crossings = []
+                    for i in range(1, len(y_data)):
+                        if y_data[i - 1] >= threshold and y_data[i] < threshold:
+                            crossings.append(i)
+
+                    # Update crossings scatter plot
+                    if len(crossings) > 0:
+                        plot['crossings_scatter'].setData(
+                            x=x_data[crossings],
+                            y=[threshold] * len(crossings)
+                        )
+                    else:
+                        plot['crossings_scatter'].clear()
+
+        except Exception as e:
+            self.log_terminal.append(f"Data processing error: {str(e)}")
 
     def update_fan_colors(self):
         if not hasattr(self, 'fan_states'):
@@ -645,7 +714,6 @@ class SensorArrayGUI(QMainWindow):
                         try:
                             speed = self.speed_select.currentIndex()
                             self.fan_serial.write(f"{i * 4 + j},{speed}\n".encode())
-                            time.sleep(self.pattern_delay)
                         except Exception as e:
                             self.log_terminal.append(f"Fan control error: {str(e)}")
 
@@ -772,7 +840,6 @@ class SensorArrayGUI(QMainWindow):
 
     def process_current_data(self):
         """Process current data for peaks and threshold crossings"""
-        from scipy.signal import find_peaks
 
         for plot in self.sensor_plots:
             if len(plot['data']['y']) > 0:
@@ -804,6 +871,7 @@ class SensorArrayGUI(QMainWindow):
                         y=[threshold] * len(crossings))
                 else:
                     plot['crossings_scatter'].clear()
+
     def closeEvent(self, event):
         self.stop_spray_pattern()  # Stop any running pattern
         if self.fan_serial:
@@ -822,7 +890,6 @@ class SensorArrayGUI(QMainWindow):
                 pass
 
         event.accept()
-
 
 
 if __name__ == '__main__':
