@@ -3,7 +3,7 @@
 
 // Constants
 #define HIGHSPEED 4090
-#define MEDSPEED 4000
+#define MEDSPEED 2300
 #define LOWSPEED 1000
 #define VERYLOWSPEED 500
 #define FANOFF 0
