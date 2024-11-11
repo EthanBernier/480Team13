@@ -1,3 +1,4 @@
+<<<<<<< Updated upstream
 import sys
 import time
 from serial.tools import list_ports
@@ -218,3 +219,106 @@ def main():
 
 if __name__ == "__main__":
     main()
+=======
+import serial
+import time
+import random
+import math
+import argparse
+
+
+class SensorSimulator:
+    def __init__(self, port='/tmp/tty.virtual1', baud=9600):
+        self.port = port
+        self.baud = baud
+        self.serial = None
+        self.timestamp = 0
+
+        # Base values for each sensor
+        self.base_values = [
+            450,  # S1 base ~450
+            150,  # S2 base ~150
+            190,  # S3 base ~190
+            240,  # S4 base ~240
+            265,  # S5 base ~265
+            290,  # S6 base ~290
+            315,  # S7 base ~315
+            330,  # S8 base ~330
+            330,  # S9 base ~330
+            350  # S10 base ~350
+        ]
+
+        # Variation ranges for each sensor
+        self.variations = [10] * 10  # Each sensor varies by ±10 units
+
+    def connect(self):
+        try:
+            self.serial = serial.Serial(self.port, self.baud)
+            print(f"Connected to {self.port} at {self.baud} baud")
+            return True
+        except Exception as e:
+            print(f"Connection error: {str(e)}")
+            return False
+
+    def generate_sensor_data(self):
+        """Generate simulated sensor readings"""
+        data = []
+        for i, base in enumerate(self.base_values):
+            # Add some random variation and a sine wave component
+            variation = random.uniform(-self.variations[i], self.variations[i])
+            sine_component = math.sin(self.timestamp / 1000.0) * 5  # 5 unit amplitude
+            value = base + variation + sine_component
+            value = max(0, min(1023, int(value)))  # Clamp to 0-1023
+            data.append(value)
+        return data
+
+    def send_data(self):
+        """Send one packet of sensor data"""
+        sensor_values = self.generate_sensor_data()
+
+        # Format: START,timestamp,S1:val,S2:val,...,S10:val,END
+        packet = f"START,{self.timestamp}"
+
+        for i, value in enumerate(sensor_values, 1):
+            packet += f",S{i}:{value}"
+
+        packet += ",END\n"
+
+        try:
+            self.serial.write(packet.encode())
+            print(f"Sent: {packet.strip()}")
+        except Exception as e:
+            print(f"Send error: {str(e)}")
+
+    def run(self, interval=0.2):
+        """Run the simulator"""
+        if not self.connect():
+            return
+
+        print("Starting sensor simulation. Press Ctrl+C to stop.")
+
+        try:
+            while True:
+                self.send_data()
+                time.sleep(interval)
+                self.timestamp += 200  # Increment timestamp by 200ms
+
+        except KeyboardInterrupt:
+            print("\nSimulation stopped by user")
+        finally:
+            if self.serial:
+                self.serial.close()
+                print("Serial port closed")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Sensor Data Simulator')
+    parser.add_argument('--port', default='/tmp/tty.virtual1', help='Serial port to use')
+    parser.add_argument('--baud', type=int, default=9600, help='Baud rate')
+    parser.add_argument('--interval', type=float, default=0.2, help='Data send interval in seconds')
+
+    args = parser.parse_args()
+
+    simulator = SensorSimulator(port=args.port, baud=args.baud)
+    simulator.run(interval=args.interval)
+>>>>>>> Stashed changes

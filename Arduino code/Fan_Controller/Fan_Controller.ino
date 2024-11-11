@@ -1,70 +1,45 @@
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
 
-// Constants for fan speeds
+// Constants
 #define HIGHSPEED 4090
 #define MEDSPEED 4000
 #define LOWSPEED 1000
 #define VERYLOWSPEED 500
 #define FANOFF 0
-
-// Pin definitions
 #define SPRAYER_PIN 4
-const int NUM_SENSORS = 10;  // A0-A9
-const int START_PIN = A0;
 
 // Pattern variables
-int cycleDuration = 1000;     // Base cycle time in milliseconds
-String sprayPattern = "";     // Binary pattern storage
+int cycleDuration = 1000;     // Base time cycle in milliseconds (1 second default)
+String sprayPattern = "";     // Will hold the binary pattern
 int currentBitIndex = 0;      // Current position in pattern
-bool isTransmitting = false;  // Pattern state
-unsigned long lastCycleTime = 0;  // For pattern timing
-unsigned long lastSensorTime = 0;  // For sensor timing
-const int SENSOR_INTERVAL = 50;   // Sensor reading interval (ms)
+bool isTransmitting = false;  // Pattern transmission state
+unsigned long lastCycleTime = 0;  // For timing control
 
-// Initialize PWM controller
 Adafruit_PWMServoDriver fanController = Adafruit_PWMServoDriver(0x40);
 
 void setup() {
-    Serial.begin(115200);
-    
-    // Initialize PWM controller
+    pinMode(SPRAYER_PIN, OUTPUT);
+    Serial.begin(9600);
     fanController.begin();
     fanController.setPWMFreq(30);
-    
-    // Initialize pins
-    pinMode(SPRAYER_PIN, OUTPUT);
-    digitalWrite(SPRAYER_PIN, LOW);
-    
-    // Initialize sensor pins
-    for(int i = 0; i < NUM_SENSORS; i++) {
-        pinMode(START_PIN + i, INPUT);
-    }
-    
-    Serial.println("Combined Controller Initialized");
 }
 
 void loop() {
-    // Check for commands
     if (Serial.available()) {
         String command = Serial.readStringUntil('\n');
         processCommand(command);
     }
-    
-    // Handle spray pattern if active
+
+    // Process pattern if active
     if (isTransmitting && sprayPattern.length() > 0) {
         unsigned long currentTime = millis();
+
+        // Check if it's time for the next cycle
         if (currentTime - lastCycleTime >= cycleDuration) {
             processNextCycle();
-            lastCycleTime = currentTime;
+            lastCycleTime = currentTime;  // Reset timing
         }
-    }
-    
-    // Handle sensor readings
-    unsigned long currentTime = millis();
-    if (currentTime - lastSensorTime >= SENSOR_INTERVAL) {
-        sendSensorData();
-        lastSensorTime = currentTime;
     }
 }
 
@@ -81,15 +56,15 @@ void processCommand(String command) {
         sprayPattern = command.substring(comma + 1);
         currentBitIndex = 0;
         isTransmitting = true;
-        lastCycleTime = millis();
+        lastCycleTime = millis();  // Initialize timing
         Serial.println("Pattern received");
     }
     else if (command.startsWith("STOP")) {
-        stopSprayPattern();
-        Serial.println("Pattern stopped");
+        stopTransmission();
+        Serial.println("Transmission stopped");
     }
     else if (command.indexOf(',') >= 0) {
-        // Handle fan control: fanNumber,speed
+        // Handle individual fan control: fanNumber,speed
         int comma = command.indexOf(',');
         int fan = command.substring(0, comma).toInt();
         int speed = command.substring(comma + 1).toInt();
@@ -104,10 +79,6 @@ void processCommand(String command) {
                 default: pwmValue = FANOFF;
             }
             fanController.setPWM(fan, 0, pwmValue);
-            Serial.print("Fan ");
-            Serial.print(fan);
-            Serial.print(" set to speed ");
-            Serial.println(speed);
         }
     }
 }
@@ -127,44 +98,17 @@ void processNextCycle() {
         digitalWrite(SPRAYER_PIN, LOW);
         Serial.print("Wait cycle ");
     }
-    
+
     Serial.print(currentBitIndex + 1);
     Serial.print(" of ");
     Serial.println(sprayPattern.length());
-    
+
     currentBitIndex++;
 }
 
-void stopSprayPattern() {
+void stopTransmission() {
     isTransmitting = false;
     sprayPattern = "";
     currentBitIndex = 0;
     digitalWrite(SPRAYER_PIN, LOW);
-}
-
-void sendSensorData() {
-    // Start of data packet
-    Serial.print("START,");
-    Serial.print(millis());
-    Serial.print(",");
-    
-    // Read and send all sensor values
-    for(int i = 0; i < NUM_SENSORS; i++) {
-        // Read sensor
-        int value = analogRead(START_PIN + i);
-        
-        // Send in format GUI expects
-        Serial.print("S");
-        Serial.print(i + 1);  // GUI expects 1-based sensor numbers
-        Serial.print(":");
-        Serial.print(value);
-        
-        // Add comma if not last sensor
-        if(i < NUM_SENSORS - 1) {
-            Serial.print(",");
-        }
-    }
-    
-    // End of data packet
-    Serial.println(",END");
 }

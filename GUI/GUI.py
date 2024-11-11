@@ -12,8 +12,10 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QPalette
 import pyqtgraph as pg
 import random
-import os
-TEST_MODE = True
+from scipy.signal import find_peaks
+import numpy as np
+
+TEST_MODE = False
 # Use simulator if TEST_MODE environment variable is set or if no real ports are available
 try:
     # Try to get real ports first
@@ -21,6 +23,7 @@ try:
     if not real_ports or TEST_MODE:
         # If no real ports or TEST_MODE is set, use simulator
         from sensor_simulator import MockSerial, MockListPorts
+
         serial.Serial = MockSerial
         serial.tools.list_ports = MockListPorts
         print("Using sensor simulator")
@@ -30,6 +33,7 @@ except Exception as e:
     print(f"Error checking ports: {str(e)}")
     # Fall back to simulator
     from sensor_simulator import MockSerial, MockListPorts
+
     serial.Serial = MockSerial
     serial.tools.list_ports = MockListPorts
     print("Falling back to sensor simulator")
@@ -196,7 +200,7 @@ class PortSelectionDialog(QDialog):
         fan_baud_layout.addWidget(QLabel("Fan Controller:"))
         self.fan_baud = QComboBox()
         self.fan_baud.addItems(['9600', '115200'])
-        self.fan_baud.setCurrentText('9600')
+        self.fan_baud.setCurrentText('115200')
         fan_baud_layout.addWidget(self.fan_baud)
         baud_layout.addLayout(fan_baud_layout)
 
@@ -205,7 +209,7 @@ class PortSelectionDialog(QDialog):
         sensor_baud_layout.addWidget(QLabel("Sensor Controller:"))
         self.sensor_baud = QComboBox()
         self.sensor_baud.addItems(['9600', '115200'])
-        self.sensor_baud.setCurrentText('9600')
+        self.sensor_baud.setCurrentText('115200')
         sensor_baud_layout.addWidget(self.sensor_baud)
         baud_layout.addLayout(sensor_baud_layout)
 
@@ -308,6 +312,11 @@ class SensorArrayGUI(QMainWindow):
         self.peak_distance_spin.setRange(1, 100)
         self.peak_distance_spin.setValue(20)
 
+        self.sensor_buffers = {i: [] for i in range(10)}  # Buffer for each sensor
+        self.SMOOTHING_WINDOW = 3  # Number of samples to average
+        self.SMOOTHED_SENSORS = {6, 7, 8, 9}  # Sensors that need smoothing (A6-A9)
+        super().__init__()
+
         # Then create the rest of the UI
         self.setup_ui()
 
@@ -339,6 +348,17 @@ class SensorArrayGUI(QMainWindow):
         self.log_terminal.setMaximumHeight(200)
         left_layout.addWidget(self.log_terminal)
 
+        # In the setup_ui method, add this near where you create the log_terminal:
+        log_layout = QVBoxLayout()
+        log_header = QHBoxLayout()
+        log_header.addWidget(QLabel("Debug Log:"))
+        clear_log_btn = QPushButton("Clear Log")
+        clear_log_btn.clicked.connect(self.log_terminal.clear)
+        log_header.addWidget(clear_log_btn)
+        log_layout.addLayout(log_header)
+        log_layout.addWidget(self.log_terminal)
+        left_layout.addLayout(log_layout)
+
         # Add detection panel
         detection_panel = self.create_detection_panel()
         left_layout.addWidget(detection_panel)
@@ -358,6 +378,171 @@ class SensorArrayGUI(QMainWindow):
         self.pattern_timer = QTimer()
         self.pattern_timer.timeout.connect(self.update_fan_pattern)
         self.pattern_timer.start(5000)  # Update every 5 seconds
+
+    def smooth_value(self, values):
+        """Calculate moving average of the last n values"""
+        return sum(values) / len(values) if values else 0
+
+    def create_plots(self):
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        plot_grid = QGridLayout()
+        self.sensor_plots = []
+
+        # Create 8 plots in a 4x2 grid
+        for i in range(10):
+            row = i // 2  # 4 rows
+            col = i % 2  # 2 columns
+
+            plot_widget = pg.PlotWidget()
+            plot_widget.setBackground('w')
+            plot_widget.setTitle(f'Sensor {i} (Pin {22 + i * 2})')
+            plot_widget.setLabel('left', 'Value')
+            plot_widget.setLabel('bottom', 'Time (s)')
+            plot_widget.showGrid(x=True, y=True)
+            plot_widget.getAxis('left').setPen('k')
+            plot_widget.getAxis('bottom').setPen('k')
+            plot_widget.getAxis('left').setTextPen('k')
+            plot_widget.getAxis('bottom').setTextPen('k')
+
+            # Set Y axis range (0 to 1023 for full analog range)
+            plot_widget.setYRange(0, 1023)
+            plot_widget.setXRange(-30, 0)
+            plot_widget.enableAutoRange(axis='y', enable=True)
+
+            curve = plot_widget.plot(pen='b')
+            threshold_line = plot_widget.addLine(y=self.threshold_spin.value(),
+                                                 pen=pg.mkPen('r', style=Qt.DashLine))
+            peaks_scatter = pg.ScatterPlotItem(pen=None, symbol='o',
+                                               size=8, brush=pg.mkBrush('g'))
+            crossings_scatter = pg.ScatterPlotItem(pen=None, symbol='x',
+                                                   size=8, brush=pg.mkBrush('r'))
+
+            plot_widget.addItem(peaks_scatter)
+            plot_widget.addItem(crossings_scatter)
+
+            plot_grid.addWidget(plot_widget, row, col)
+
+            self.sensor_plots.append({
+                'widget': plot_widget,
+                'curve': curve,
+                'threshold_line': threshold_line,
+                'peaks_scatter': peaks_scatter,
+                'crossings_scatter': crossings_scatter,
+                'data': {'x': [], 'y': []}
+            })
+
+        right_layout.addLayout(plot_grid)
+        return right_panel
+    def update_sensor_data(self):
+        """Update sensor data with smoothing for specific sensors"""
+        if not self.sensor_serial:
+            if not hasattr(self, '_no_serial_logged'):
+                self.log_terminal.append("No sensor serial connection available")
+                self._no_serial_logged = True
+            return
+
+        try:
+            if self.sensor_serial.in_waiting:
+                line = self.sensor_serial.readline().decode().strip()
+
+                try:
+                    if line.startswith("START") and line.endswith("END"):
+                        parts = line.split(',')
+                        timestamp = time.time() - self.start_time
+
+                        # Process all sensors
+                        for part in parts[2:-1]:  # Skip START, timestamp, and END
+                            if ':' in part and part.startswith('S'):
+                                try:
+                                    sensor_str, value_str = part.split(':')
+                                    sensor_num = int(sensor_str.replace('S', '')) - 1
+                                    raw_value = float(value_str)
+
+                                    # Add value to buffer
+                                    if sensor_num in self.sensor_buffers:
+                                        self.sensor_buffers[sensor_num].append(raw_value)
+                                        # Keep buffer at smoothing window size
+                                        if len(self.sensor_buffers[sensor_num]) > self.SMOOTHING_WINDOW:
+                                            self.sensor_buffers[sensor_num].pop(0)
+
+                                    # Apply smoothing for sensors A6-A9
+                                    if sensor_num in self.SMOOTHED_SENSORS:
+                                        value = self.smooth_value(self.sensor_buffers[sensor_num])
+                                    else:
+                                        value = raw_value
+
+                                    if 0 <= sensor_num < len(self.sensor_plots):
+                                        self.update_plot(sensor_num, timestamp, value)
+
+                                        # Log only occasionally to avoid spam
+                                        if timestamp % 5 < 0.1:
+                                            if sensor_num in self.SMOOTHED_SENSORS:
+                                                self.log_terminal.append(
+                                                    f"Sensor {sensor_num + 1}: raw={raw_value:.2f}, "
+                                                    f"smoothed={value:.2f}")
+                                            elif sensor_num == 0:  # Log sensor 0 as reference
+                                                self.log_terminal.append(
+                                                    f"Sensor {sensor_num + 1}: value={value:.2f}")
+
+                                except ValueError as ve:
+                                    self.log_terminal.append(f"Value error for {sensor_str}: {ve}")
+
+                    elif not line.startswith("Fan"):  # Ignore fan control messages
+                        self.log_terminal.append(f"Unknown data format: {line}")
+
+                except Exception as e:
+                    self.log_terminal.append(f"Error parsing line: {str(e)}")
+
+        except Exception as e:
+            self.log_terminal.append(f"Serial read error: {str(e)}")
+
+    def process_plot_data(self, plot_index):
+        """Process plot data with peak detection"""
+        try:
+            from scipy.signal import find_peaks
+
+            plot = self.sensor_plots[plot_index]
+            if len(plot['data']['y']) > 1:
+                y_data = np.array(plot['data']['y'])
+                x_data = np.array(plot['data']['x'])
+                threshold = self.threshold_spin.value()
+
+                # Find peaks if enough data points
+                if len(y_data) > self.peak_distance_spin.value():
+                    peaks, _ = find_peaks(y_data,
+                                          height=self.peak_height_spin.value(),
+                                          distance=self.peak_distance_spin.value())
+
+                    # Update peaks scatter plot
+                    if len(peaks) > 0:
+                        plot['peaks_scatter'].setData(
+                            x=x_data[peaks],
+                            y=y_data[peaks]
+                        )
+                    else:
+                        plot['peaks_scatter'].clear()
+
+                    # Find threshold crossings (falling edges)
+                    crossings = []
+                    for i in range(1, len(y_data)):
+                        if y_data[i - 1] >= threshold and y_data[i] < threshold:
+                            crossings.append(i)
+
+                    # Update crossings scatter plot
+                    if len(crossings) > 0:
+                        plot['crossings_scatter'].setData(
+                            x=x_data[crossings],
+                            y=[threshold] * len(crossings)
+                        )
+                    else:
+                        plot['crossings_scatter'].clear()
+
+        except Exception as e:
+            # Only log peak detection errors once
+            if not hasattr(self, '_peak_error_logged'):
+                self.log_terminal.append(f"Peak detection disabled: {str(e)}")
+                self._peak_error_logged = True
 
     def create_fan_panel(self):
         """Create fan control panel"""
@@ -438,47 +623,6 @@ class SensorArrayGUI(QMainWindow):
 
         return sprayer_panel
 
-    def update_plot(self, plot_index, timestamp, value):
-        """Helper function to update a single plot"""
-        try:
-            plot = self.sensor_plots[plot_index]
-
-            # Log data occasionally for debugging
-            if len(plot['data']['x']) % 50 == 0:  # Log every 50th point
-                self.log_terminal.append(f"Sensor {plot_index + 1}: t={timestamp:.2f}, v={value:.2f}")
-
-            plot['data']['x'].append(timestamp)
-            plot['data']['y'].append(value)
-
-            # Keep last 300 points (30 seconds at 10Hz)
-            while len(plot['data']['x']) > 300:
-                plot['data']['x'].pop(0)
-                plot['data']['y'].pop(0)
-
-            # Update plot
-            plot['curve'].setData(
-                plot['data']['x'],
-                plot['data']['y']
-            )
-
-            # Add auto-scaling for better visualization
-            if len(plot['data']['y']) > 0:
-                ymin = min(plot['data']['y'])
-                ymax = max(plot['data']['y'])
-                padding = (ymax - ymin) * 0.1  # 10% padding
-                plot['widget'].setYRange(ymin - padding, ymax + padding)
-
-            # Update X axis range to show last 30 seconds
-            x_min = max(0, timestamp - 30)
-            x_max = timestamp + 1
-            plot['widget'].setXRange(x_min, x_max, padding=0)
-
-            # Process peaks and crossings
-            self.process_plot_data(plot_index)
-
-        except Exception as e:
-            self.log_terminal.append(f"Plot update error for sensor {plot_index + 1}: {str(e)}")
-
     def create_detection_panel(self):
         """Create detection settings panel"""
         detection_panel = QFrame()
@@ -509,6 +653,7 @@ class SensorArrayGUI(QMainWindow):
         detection_layout.addWidget(auto_threshold_btn)
 
         return detection_panel
+
     def update_pattern_delay(self):
         try:
             new_delay = float(self.pattern_delay_input.text())
@@ -517,58 +662,74 @@ class SensorArrayGUI(QMainWindow):
         except ValueError:
             pass
 
-    # In __init__ or setup_ui, replace the plot creation code with:
-    def create_plots(self):
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        plot_grid = QGridLayout()
-        self.sensor_plots = []
+    def update_plot(self, plot_index, timestamp, value):
+        """Helper function to update a single plot with smoothing visualization"""
+        try:
+            plot = self.sensor_plots[plot_index]
 
-        # Create 8 plots in a 4x2 grid
-        for i in range(8):
-            row = i // 2  # 4 rows
-            col = i % 2  # 2 columns
+            # Store new data point
+            plot['data']['x'].append(timestamp)
+            plot['data']['y'].append(value)
 
-            plot_widget = pg.PlotWidget()
-            plot_widget.setBackground('w')
-            plot_widget.setTitle(f'Sensor {i} (Pin {22 + i * 2})')
-            plot_widget.setLabel('left', 'Value')
-            plot_widget.setLabel('bottom', 'Time (s)')
-            plot_widget.showGrid(x=True, y=True)
-            plot_widget.getAxis('left').setPen('k')
-            plot_widget.getAxis('bottom').setPen('k')
-            plot_widget.getAxis('left').setTextPen('k')
-            plot_widget.getAxis('bottom').setTextPen('k')
+            # Keep last 30 seconds of data
+            current_time = timestamp
+            while plot['data']['x'] and (current_time - plot['data']['x'][0]) > 30:
+                plot['data']['x'].pop(0)
+                plot['data']['y'].pop(0)
 
-            # Set Y axis range (0 to 1023 for full analog range)
-            plot_widget.setYRange(0, 1023, padding=0.1)
-            # Set X axis range (30 seconds window)
-            plot_widget.setXRange(-30, 0, padding=0.1)
+            # Update plot data with different styling for smoothed sensors
+            if plot_index in self.SMOOTHED_SENSORS:
+                # Use a thicker line for smoothed data
+                plot['curve'].setData(
+                    plot['data']['x'],
+                    plot['data']['y'],
+                    pen=pg.mkPen('b', width=2)  # Thicker blue line for smoothed data
+                )
 
-            curve = plot_widget.plot(pen='b')
-            threshold_line = plot_widget.addLine(y=self.threshold_spin.value(),
-                                                 pen=pg.mkPen('r', style=Qt.DashLine))
-            peaks_scatter = pg.ScatterPlotItem(pen=None, symbol='o',
-                                               size=8, brush=pg.mkBrush('g'))
-            crossings_scatter = pg.ScatterPlotItem(pen=None, symbol='x',
-                                                   size=8, brush=pg.mkBrush('r'))
+                # Update title for smoothed plots (safely)
+                if not hasattr(plot['widget'], '_smoothing_indicator'):
+                    current_title = plot['widget'].getPlotItem().titleLabel.text
+                    plot['widget'].setTitle(f"{current_title} (Smoothed)")
+                    try:
+                        plot['widget'].getPlotItem().titleLabel.setStyleSheet("color: #0066cc;")
+                    except:
+                        pass  # If style setting fails, continue without style
+                    plot['widget']._smoothing_indicator = True
+            else:
+                plot['curve'].setData(
+                    plot['data']['x'],
+                    plot['data']['y'],
+                    pen=pg.mkPen('b', width=1)  # Normal line for raw data
+                )
 
-            plot_widget.addItem(peaks_scatter)
-            plot_widget.addItem(crossings_scatter)
+            # Auto-scale Y axis with more padding for smoothed sensors
+            if len(plot['data']['y']) > 0:
+                ymin = min(plot['data']['y'])
+                ymax = max(plot['data']['y'])
+                padding = (ymax - ymin) * (0.15 if plot_index in self.SMOOTHED_SENSORS else 0.1)
+                if padding == 0:  # Handle case where min == max
+                    padding = 0.1 * ymax if ymax != 0 else 1.0
+                plot['widget'].setYRange(ymin - padding, ymax + padding)
 
-            plot_grid.addWidget(plot_widget, row, col)
+            # Update X axis to show moving 30-second window
+            plot['widget'].setXRange(current_time - 30, current_time)
 
-            self.sensor_plots.append({
-                'widget': plot_widget,
-                'curve': curve,
-                'threshold_line': threshold_line,
-                'peaks_scatter': peaks_scatter,
-                'crossings_scatter': crossings_scatter,
-                'data': {'x': [], 'y': []}
-            })
+            # Update threshold line position
+            plot['threshold_line'].setValue(self.threshold_spin.value())
 
-        right_layout.addLayout(plot_grid)
-        return right_panel
+            # Process peaks and crossings
+            self.process_plot_data(plot_index)
+
+        except Exception as e:
+            if not hasattr(self, '_plot_errors'):
+                self._plot_errors = set()
+            error_key = f"{plot_index}:{str(e)}"
+            if error_key not in self._plot_errors:
+                self.log_terminal.append(f"Plot update error for sensor {plot_index + 1}: {str(e)}")
+                self._plot_errors.add(error_key)  # Only log each unique error once
+
+
+
     def show_port_selection(self):
         """Show port selection dialog and connect to selected ports"""
         try:
@@ -1068,7 +1229,7 @@ class SensorArrayGUI(QMainWindow):
                     fan_grid.addWidget(btn, i, j)
                     row.append(btn)
                 self.fan_buttons.append(row)
-            for i in range(8):
+            for i in range(10):
                 # Calculate grid position
                 row = i // 2  # 4 rows
                 col = i % 2  # 2 columns
@@ -1324,101 +1485,7 @@ class SensorArrayGUI(QMainWindow):
                 self.log_terminal.append(f"Sensor controller connection error: {str(e)}")
                 self.sensor_serial = None
 
-        def update_sensor_data(self):
-            if not self.sensor_serial:
-                return
 
-            try:
-                if self.sensor_serial.in_waiting:
-                    line = self.sensor_serial.readline().decode().strip()
-                    self.log_terminal.append(f"Raw data: {line}")  # Debug logging
-
-                    if line.startswith("START") and line.endswith("END"):
-                        parts = line.split(',')
-
-                        if len(parts) < 12:  # START + timestamp + 10 sensors + END
-                            self.log_terminal.append("Invalid data format - not enough parts")
-                            return
-
-                        # Get timestamp from the data
-                        timestamp = float(parts[1]) / 1000.0  # Convert to seconds
-
-                        # Process each sensor reading (S1:value through S10:value)
-                        for i in range(10):  # Process all 10 sensors
-                            sensor_data = parts[i + 2].split(':')  # +2 to skip START and timestamp
-                            if len(sensor_data) == 2:
-                                try:
-                                    # Extract sensor number and value
-                                    sensor_num = int(sensor_data[0].replace('S', '')) - 1  # Convert to 0-based index
-                                    value = float(sensor_data[1])
-
-                                    # Update the appropriate plot
-                                    if 0 <= sensor_num < len(self.sensor_plots):
-                                        self.update_plot(sensor_num, timestamp, value)
-                                    else:
-                                        self.log_terminal.append(f"Invalid sensor number: {sensor_num + 1}")
-
-                                except ValueError as ve:
-                                    self.log_terminal.append(f"Value error: {ve}")
-                                except Exception as e:
-                                    self.log_terminal.append(f"Error processing sensor {i + 1}: {e}")
-
-            except Exception as e:
-                self.log_terminal.append(f"Sensor data error: {str(e)}")
-
-
-        # In __init__ or setup_ui, replace the plot creation code with:
-        def create_plots(self):
-            right_panel = QWidget()
-            right_layout = QVBoxLayout(right_panel)
-            plot_grid = QGridLayout()
-            self.sensor_plots = []
-
-            # Create 8 plots in a 4x2 grid
-            for i in range(8):
-                row = i // 2  # 4 rows
-                col = i % 2  # 2 columns
-
-                plot_widget = pg.PlotWidget()
-                plot_widget.setBackground('w')
-                plot_widget.setTitle(f'Sensor {i} (Pin {22 + i * 2})')
-                plot_widget.setLabel('left', 'Value')
-                plot_widget.setLabel('bottom', 'Time (s)')
-                plot_widget.showGrid(x=True, y=True)
-                plot_widget.getAxis('left').setPen('k')
-                plot_widget.getAxis('bottom').setPen('k')
-                plot_widget.getAxis('left').setTextPen('k')
-                plot_widget.getAxis('bottom').setTextPen('k')
-
-                # Set Y axis range (0 to 1023 for full analog range)
-                plot_widget.setYRange(0, 1023)
-                plot_widget.setXRange(-30, 0)
-                plot_widget.enableAutoRange(axis='y', enable=True)
-
-                curve = plot_widget.plot(pen='b')
-                threshold_line = plot_widget.addLine(y=self.threshold_spin.value(),
-                                                     pen=pg.mkPen('r', style=Qt.DashLine))
-                peaks_scatter = pg.ScatterPlotItem(pen=None, symbol='o',
-                                                   size=8, brush=pg.mkBrush('g'))
-                crossings_scatter = pg.ScatterPlotItem(pen=None, symbol='x',
-                                                       size=8, brush=pg.mkBrush('r'))
-
-                plot_widget.addItem(peaks_scatter)
-                plot_widget.addItem(crossings_scatter)
-
-                plot_grid.addWidget(plot_widget, row, col)
-
-                self.sensor_plots.append({
-                    'widget': plot_widget,
-                    'curve': curve,
-                    'threshold_line': threshold_line,
-                    'peaks_scatter': peaks_scatter,
-                    'crossings_scatter': crossings_scatter,
-                    'data': {'x': [], 'y': []}
-                })
-
-            right_layout.addLayout(plot_grid)
-            return right_panel
 
         def update_fan_colors(self):
             if not hasattr(self, 'fan_states'):
@@ -1657,44 +1724,6 @@ class SensorArrayGUI(QMainWindow):
                     self.log_terminal.append(f"Error closing sensor serial: {str(e)}")
 
             event.accept()
-
-
-    def update_sensor_data(self):
-        if not self.sensor_serial:
-            return
-
-        try:
-            if self.sensor_serial.in_waiting:
-                line = self.sensor_serial.readline().decode().strip()
-                # self.log_terminal.append(f"Raw data: {line}")  # Uncomment for debugging
-
-                # Parse "A0:value,A1:value" format
-                try:
-                    # Split into individual sensor readings
-                    readings = line.split(',')
-
-                    # Get current timestamp
-                    timestamp = time.time() - self.start_time
-
-                    for reading in readings:
-                        if ':' in reading:
-                            sensor, value = reading.split(':')
-                            value = float(value)
-
-                            # Update appropriate plot
-                            if sensor == 'A0':
-                                self.update_plot(0, timestamp, value)
-                            elif sensor == 'A1':
-                                self.update_plot(1, timestamp, value)
-
-                except ValueError as ve:
-                    self.log_terminal.append(f"Value error parsing sensor data: {ve}")
-                except Exception as e:
-                    self.log_terminal.append(f"Error parsing sensor line: {e}")
-
-        except Exception as e:
-            self.log_terminal.append(f"Sensor data error: {str(e)}")
-
 
     def process_plot_data(self, plot_index):
         """Process current data for peaks and threshold crossings for a single plot"""
