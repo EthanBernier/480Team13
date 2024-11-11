@@ -1,420 +1,324 @@
+<<<<<<< Updated upstream
+import sys
 import time
-import random
-import serial
 from serial.tools import list_ports
-import matplotlib.pyplot as plt
-import numpy as np
+import serial
+import random
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QPushButton, QLabel, QComboBox,
-                             QTextEdit, QTabWidget, QSpinBox, QDoubleSpinBox,
-                             QCheckBox, QGroupBox)
-from PyQt5.QtCore import Qt, QTimer
-import threading
-import queue
+                             QPushButton, QTextEdit, QLabel, QComboBox,
+                             QMessageBox, QLineEdit, QHBoxLayout, QCheckBox)
+from PyQt5.QtCore import QTimer
 
 
-class SerialMonitor:
-    def __init__(self):
-        self.running = False
-        self.queue = queue.Queue()
-        self.thread = None
-
-    def start_monitoring(self, serial_port, callback):
-        self.running = True
-        self.thread = threading.Thread(target=self._monitor_serial,
-                                       args=(serial_port, callback))
-        self.thread.daemon = True
-        self.thread.start()
-
-    def stop_monitoring(self):
-        self.running = False
-        if self.thread:
-            self.thread.join()
-
-    def _monitor_serial(self, serial_port, callback):
-        while self.running:
-            if serial_port.in_waiting:
-                try:
-                    data = serial_port.readline().decode().strip()
-                    callback(data)
-                except Exception as e:
-                    callback(f"Error reading serial: {str(e)}")
-            time.sleep(0.01)
-
-
-class SensorDebugGUI(QMainWindow):
+class SerialPortTester(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Sensor Array Debug Interface")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setWindowTitle("Enhanced Serial Port Tester")
+        self.setGeometry(100, 100, 800, 600)
 
-        # Initialize serial monitor
-        self.serial_monitor = SerialMonitor()
-
-        # Initialize tester
-        self.tester = SensorArrayTester(self)
-
-        # Create main widget and layout
+        # Main widget and layout
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
-        main_layout = QVBoxLayout(main_widget)
+        layout = QVBoxLayout(main_widget)
 
-        # Create control panel
-        control_panel = QGroupBox("Control Panel")
-        control_layout = QHBoxLayout()
+        # Port selection section
+        port_section = QWidget()
+        port_layout = QHBoxLayout(port_section)
 
         # Port selection
-        port_layout = QVBoxLayout()
+        port_left = QVBoxLayout()
         self.port_combo = QComboBox()
-        self.baud_combo = QComboBox()
-        self.baud_combo.addItems(['9600', '115200'])
-        self.baud_combo.setCurrentText('115200')
-        self.refresh_btn = QPushButton("Refresh Ports")
-        self.refresh_btn.clicked.connect(self.refresh_ports)
-        self.connect_btn = QPushButton("Connect")
-        self.connect_btn.clicked.connect(self.connect_port)
-        port_layout.addWidget(QLabel("Serial Port:"))
-        port_layout.addWidget(self.port_combo)
-        port_layout.addWidget(QLabel("Baud Rate:"))
-        port_layout.addWidget(self.baud_combo)
-        port_layout.addWidget(self.refresh_btn)
-        port_layout.addWidget(self.connect_btn)
-        control_layout.addLayout(port_layout)
+        port_left.addWidget(QLabel("Available Ports:"))
+        port_left.addWidget(self.port_combo)
 
-        # Test data configuration
-        test_config = QVBoxLayout()
-        self.duration_spin = QSpinBox()
-        self.duration_spin.setRange(1, 3600)
-        self.duration_spin.setValue(10)
-        self.noise_spin = QDoubleSpinBox()
-        self.noise_spin.setRange(0, 1)
-        self.noise_spin.setSingleStep(0.1)
-        self.noise_spin.setValue(0.1)
+        # Manual port entry
+        port_right = QVBoxLayout()
+        self.manual_port = QLineEdit()
+        self.manual_port.setPlaceholderText("Enter port manually (e.g., COM1 or /dev/ttyS0)")
+        port_right.addWidget(QLabel("Manual Port Entry:"))
+        port_right.addWidget(self.manual_port)
 
-        # Add send interval control
-        self.interval_spin = QSpinBox()
-        self.interval_spin.setRange(100, 5000)  # 100ms to 5000ms
-        self.interval_spin.setValue(200)
-        self.interval_spin.setSingleStep(100)
+        port_layout.addLayout(port_left)
+        port_layout.addLayout(port_right)
+        layout.addWidget(port_section)
 
-        test_config.addWidget(QLabel("Duration (s):"))
-        test_config.addWidget(self.duration_spin)
-        test_config.addWidget(QLabel("Noise Level:"))
-        test_config.addWidget(self.noise_spin)
-        test_config.addWidget(QLabel("Send Interval (ms):"))
-        test_config.addWidget(self.interval_spin)
-        control_layout.addLayout(test_config)
+        # Refresh and connect buttons
+        button_layout = QHBoxLayout()
 
-        # Debug options
-        debug_options = QVBoxLayout()
-        self.raw_data_cb = QCheckBox("Show Raw Data")
-        self.parsed_data_cb = QCheckBox("Show Parsed Data")
-        self.timing_cb = QCheckBox("Show Timing Info")
-        self.echo_cb = QCheckBox("Show Serial Echo")
-        debug_options.addWidget(QLabel("Debug Options:"))
-        debug_options.addWidget(self.raw_data_cb)
-        debug_options.addWidget(self.parsed_data_cb)
-        debug_options.addWidget(self.timing_cb)
-        debug_options.addWidget(self.echo_cb)
-        control_layout.addLayout(debug_options)
+        # Refresh ports button
+        refresh_btn = QPushButton("Refresh Ports")
+        refresh_btn.clicked.connect(self.refresh_ports)
+        button_layout.addWidget(refresh_btn)
 
-        # Test control buttons
-        button_layout = QVBoxLayout()
-        self.generate_btn = QPushButton("Generate Test Data")
-        self.generate_btn.clicked.connect(self.generate_data)
-        self.visualize_btn = QPushButton("Visualize Data")
-        self.visualize_btn.clicked.connect(self.visualize_data)
-        self.send_btn = QPushButton("Send Test Data")
-        self.send_btn.clicked.connect(self.send_data)
-        self.stop_btn = QPushButton("Stop")
-        self.stop_btn.clicked.connect(self.stop_test)
-        self.stop_btn.setEnabled(False)
+        # Connect buttons
+        self.connect_btn = QPushButton("Connect to Selected")
+        self.connect_btn.clicked.connect(lambda: self.connect_port(False))
+        button_layout.addWidget(self.connect_btn)
 
-        # Add manual send button and text field
-        self.manual_send_layout = QHBoxLayout()
-        self.manual_text = QTextEdit()
-        self.manual_text.setMaximumHeight(50)
-        self.manual_send_btn = QPushButton("Send")
-        self.manual_send_btn.clicked.connect(self.send_manual_data)
-        self.manual_send_layout.addWidget(self.manual_text)
-        self.manual_send_layout.addWidget(self.manual_send_btn)
+        self.connect_manual_btn = QPushButton("Connect to Manual")
+        self.connect_manual_btn.clicked.connect(lambda: self.connect_port(True))
+        button_layout.addWidget(self.connect_manual_btn)
 
-        button_layout.addWidget(self.generate_btn)
-        button_layout.addWidget(self.visualize_btn)
-        button_layout.addWidget(self.send_btn)
-        button_layout.addWidget(self.stop_btn)
-        button_layout.addLayout(self.manual_send_layout)
-        control_layout.addLayout(button_layout)
+        layout.addLayout(button_layout)
 
-        control_panel.setLayout(control_layout)
-        main_layout.addWidget(control_panel)
+        # Status section
+        self.status_text = QTextEdit()
+        self.status_text.setMaximumHeight(100)
+        self.status_text.setReadOnly(True)
+        layout.addWidget(QLabel("Connection Status:"))
+        layout.addWidget(self.status_text)
 
-        # Create tab widget for terminals
-        self.terminals = QTabWidget()
+        # Test controls
+        test_layout = QHBoxLayout()
 
-        # Main debug terminal
-        self.debug_terminal = QTextEdit()
-        self.debug_terminal.setReadOnly(True)
-        self.terminals.addTab(self.debug_terminal, "Debug Log")
+        self.loopback_btn = QPushButton("Run Loopback Test")
+        self.loopback_btn.clicked.connect(self.run_loopback_test)
+        test_layout.addWidget(self.loopback_btn)
 
-        # Raw data terminal
-        self.raw_terminal = QTextEdit()
-        self.raw_terminal.setReadOnly(True)
-        self.terminals.addTab(self.raw_terminal, "Raw Data")
+        self.continuous_cb = QCheckBox("Continuous Send")
+        test_layout.addWidget(self.continuous_cb)
 
-        # Serial monitor terminal
-        self.serial_terminal = QTextEdit()
-        self.serial_terminal.setReadOnly(True)
-        self.terminals.addTab(self.serial_terminal, "Serial Monitor")
+        layout.addLayout(test_layout)
 
-        main_layout.addWidget(self.terminals)
+        # Terminal
+        self.terminal = QTextEdit()
+        self.terminal.setReadOnly(True)
+        layout.addWidget(QLabel("Communication Log:"))
+        layout.addWidget(self.terminal)
 
-        # Initialize
-        self.refresh_ports()
-        self.test_running = False
+        # Initialize serial port
+        self.serial_port = None
+        self.read_timer = QTimer()
+        self.read_timer.timeout.connect(self.read_serial)
+        self.read_timer.start(100)
 
-        # Setup timer for data sending
+        # Continuous send timer
         self.send_timer = QTimer()
-        self.send_timer.timeout.connect(self.send_next_data)
-        self.current_sample = 0
+        self.send_timer.timeout.connect(lambda: self.run_loopback_test(True))
 
-    def send_manual_data(self):
-        if not self.tester.serial_port:
-            self.debug_terminal.append("Not connected to serial port")
-            return
-
-        try:
-            data = self.manual_text.toPlainText() + '\n'
-            self.tester.serial_port.write(data.encode())
-            self.debug_terminal.append(f"Sent manual data: {data.strip()}")
-            self.manual_text.clear()
-        except Exception as e:
-            self.debug_terminal.append(f"Error sending manual data: {str(e)}")
+        # Initial port refresh
+        self.refresh_ports()
 
     def refresh_ports(self):
+        """Refresh the list of available ports with detailed information"""
         self.port_combo.clear()
-        ports = [port.device for port in list_ports.comports()]
-        self.port_combo.addItems(ports)
-
-    def handle_serial_data(self, data):
-        if self.echo_cb.isChecked():
-            self.serial_terminal.append(f"RECV: {data}")
-
-
-    def connect_port(self):
-        if self.connect_btn.text() == "Connect":
-            port = self.port_combo.currentText()
-            baud = int(self.baud_combo.currentText())
-            if self.tester.connect(port, baud):
-                self.connect_btn.setText("Disconnect")
-                self.debug_terminal.append(f"Connected to {port} at {baud} baud")
-                # Start serial monitor
-                self.serial_monitor.start_monitoring(self.tester.serial_port,
-                                                     self.handle_serial_data)
-            else:
-                self.debug_terminal.append("Connection failed")
-        else:
-            self.serial_monitor.stop_monitoring()
-            self.tester.disconnect()
-            self.connect_btn.setText("Connect")
-            self.debug_terminal.append("Disconnected")
-
-    def generate_data(self):
-        duration = self.duration_spin.value()
-        noise = self.noise_spin.value()
-        self.timestamps, self.test_data = self.tester.generate_test_data(duration, noise)
-        self.debug_terminal.append(f"Generated test data: {duration}s, noise level {noise}")
-
-    def visualize_data(self):
-        self.tester.visualize_test_data()
-
-    def send_data(self):
-        if not hasattr(self, 'test_data') or not self.test_data:
-            self.debug_terminal.append("No test data available. Generate data first.")
-            return
-
-        if not self.tester.serial_port:
-            self.debug_terminal.append("Not connected to serial port")
-            return
-
-        self.test_running = True
-        self.current_sample = 0
-        self.stop_btn.setEnabled(True)
-        self.send_btn.setEnabled(False)
-        interval = self.interval_spin.value()
-        self.send_timer.start(interval)
-        self.debug_terminal.append(f"Started sending data with {interval}ms interval")
-
-    def stop_test(self):
-        self.test_running = False
-        self.send_timer.stop()
-        self.stop_btn.setEnabled(False)
-        self.send_btn.setEnabled(True)
-        self.debug_terminal.append("Test stopped")
-
-    def send_next_data(self):
-        if not self.test_running or self.current_sample >= len(self.test_data[0]):
-            self.stop_test()
-            return
-
         try:
-            # Format data packet
-            timestamp = int(time.time() * 1000)
-            packet = f"START,{timestamp},"
+            ports = list_ports.comports()
+            self.terminal.append("=== Available Ports ===")
 
-            # Add sensor readings
-            for s in range(16):
-                for board in range(2):
-                    packet += f"S{s + 1}A{board}:{self.test_data[s][self.current_sample]},"
+            if not ports:
+                self.terminal.append("No ports found!")
 
-            packet += "END\n"
+            for port in ports:
+                # Add to combo box
+                self.port_combo.addItem(port.device)
 
-            # Send data
-            self.tester.serial_port.write(packet.encode())
+                # Show detailed information
+                port_info = (f"\nPort: {port.device}\n"
+                             f"Description: {port.description}\n"
+                             f"Hardware ID: {port.hwid}\n"
+                             f"VID:PID: {port.vid}:{port.pid}\n"
+                             f"Serial Number: {port.serial_number}\n"
+                             f"Location: {port.location}\n"
+                             f"Manufacturer: {port.manufacturer}\n"
+                             f"Product: {port.product}\n"
+                             f"Interface: {port.interface}\n")
+                self.terminal.append(port_info)
 
-            # Update debug information
-            if self.raw_data_cb.isChecked():
-                self.raw_terminal.append(f"SENT: {packet.strip()}")
-
-            if self.parsed_data_cb.isChecked():
-                parsed_data = f"Sample {self.current_sample}: "
-                for s in range(16):
-                    parsed_data += f"S{s + 1}={self.test_data[s][self.current_sample]} "
-                self.debug_terminal.append(parsed_data)
-
-            if self.timing_cb.isChecked():
-                self.debug_terminal.append(f"Time: {timestamp}ms")
-
-            self.current_sample += 1
+            self.terminal.append("=" * 40 + "\n")
 
         except Exception as e:
-            self.debug_terminal.append(f"Error sending data: {str(e)}")
-            self.stop_test()
+            self.terminal.append(f"Error refreshing ports: {str(e)}")
 
-
-class SensorArrayTester:
-    def __init__(self, gui=None):
-        self.num_sensors = 16
-        self.serial_port = None
-        self.test_data = []
-        self.gui = gui
-
-    def connect(self, port, baud=115200):
-        try:
-            self.serial_port = serial.Serial(port, baud, timeout=1)
-            time.sleep(2)  # Wait for Arduino reset
-            return True
-        except Exception as e:
-            if self.gui:
-                self.gui.debug_terminal.append(f"Connection error: {str(e)}")
-            return False
-
-    def disconnect(self):
+    def connect_port(self, use_manual=False):
+        """Connect to either selected or manually entered port"""
         if self.serial_port:
-            self.serial_port.close()
+            try:
+                self.serial_port.close()
+                self.serial_port = None
+                self.status_text.setText("Disconnected")
+                self.connect_btn.setText("Connect to Selected")
+                self.connect_manual_btn.setText("Connect to Manual")
+                self.terminal.append("Disconnected from port")
+                return
+            except Exception as e:
+                self.terminal.append(f"Error disconnecting: {str(e)}")
+                return
+
+        try:
+            port = self.manual_port.text() if use_manual else self.port_combo.currentText()
+            if not port:
+                raise ValueError("No port specified")
+
+            self.status_text.setText(f"Attempting to connect to {port}...")
+            self.serial_port = serial.Serial(port, 115200, timeout=0.1)
+
+            if self.serial_port.is_open:
+                self.status_text.setText(f"Connected to {port}")
+                self.connect_btn.setText("Disconnect")
+                self.connect_manual_btn.setText("Disconnect")
+                self.terminal.append(f"Successfully connected to {port}")
+            else:
+                raise ConnectionError("Failed to open port")
+
+        except Exception as e:
+            self.status_text.setText(f"Connection failed: {str(e)}")
+            self.terminal.append(f"Connection error: {str(e)}")
             self.serial_port = None
 
-    def generate_test_data(self, duration=10, noise_level=0.1):
-        """Generate binary sensor data with correlated falling edges"""
-        sample_rate = 5  # Hz
-        num_samples = int(duration * sample_rate)
-        timestamps = np.linspace(0, duration, num_samples)
+    def read_serial(self):
+        """Read data from serial port"""
+        if self.serial_port and self.serial_port.is_open:
+            try:
+                if self.serial_port.in_waiting:
+                    data = self.serial_port.readline().decode()
+                    self.terminal.append(f"RECEIVED: {data.strip()}")
+            except Exception as e:
+                self.terminal.append(f"Read error: {str(e)}")
 
-        # Create base signal first for correlation
-        base_signal = np.zeros(num_samples)
-
-        # Add pulses to base signal
-        num_pulses = random.randint(2, 4)  # 2-4 pulses total
-        for _ in range(num_pulses):
-            start_idx = random.randint(0, num_samples - int(sample_rate))
-            fall_duration = int(sample_rate * 0.5)  # 0.5 seconds fall time
-
-            # Create the pulse with falling edge
-            base_signal[start_idx] = 1023
-
-            # Create exponential decay
-            fall_indices = np.arange(fall_duration)
-            decay = 1023 * np.exp(-3 * fall_indices / fall_duration)
-
-            # Apply decay pattern
-            for j, val in enumerate(decay):
-                if start_idx + j < num_samples:
-                    base_signal[start_idx + j] = val
-
-        # Generate correlated signals for all sensors
-        self.test_data = []
-        variation_range = 0.15  # 15% maximum variation
-
-        # Define sensor positions in 4x4 grid
-        grid_positions = [(x, y) for x in range(4) for y in range(4)]
-        center_x, center_y = 1.5, 1.5  # Center of the 4x4 grid
-
-        for i, (grid_x, grid_y) in enumerate(grid_positions):
-            # Calculate distance from center to create variation
-            distance = np.sqrt((grid_x - center_x) ** 2 + (grid_y - center_y) ** 2)
-            max_distance = np.sqrt(2 * 2 + 2 * 2)  # Maximum possible distance
-            distance_factor = 1 - (distance / max_distance * variation_range)
-
-            # Create correlated signal with position-based variation
-            signal = base_signal * distance_factor
-
-            # Add small random variation (keeping within variation range)
-            random_variation = 1 + np.random.uniform(-variation_range / 2, variation_range / 2, num_samples)
-            signal = signal * random_variation
-
-            # Add minimal noise
-            noise = np.random.normal(0, noise_level * 20, num_samples)  # Reduced noise
-            signal = signal + noise
-
-            # Clip values to valid range
-            signal = np.clip(signal, 0, 1023)
-            signal = signal.astype(int)
-
-            self.test_data.append(signal)
-
-        # Add slight time delays based on position
-        max_delay_samples = int(sample_rate * 0.1)  # Maximum 0.1 second delay
-        for i, (grid_x, grid_y) in enumerate(grid_positions):
-            if i > 0:  # Skip first sensor
-                distance = np.sqrt((grid_x - center_x) ** 2 + (grid_y - center_y) ** 2)
-                delay_samples = int(distance / max_distance * max_delay_samples)
-                if delay_samples > 0:
-                    # Shift signal and pad with zeros
-                    self.test_data[i] = np.pad(self.test_data[i][:-delay_samples],
-                                               (delay_samples, 0),
-                                               'constant')
-
-        return timestamps, self.test_data
-    def visualize_test_data(self):
-        """Plot test data for verification"""
-        if not self.test_data:
-            if self.gui:
-                self.gui.debug_terminal.append("No test data to visualize")
+    def run_loopback_test(self, continuous=False):
+        """Send test data through the serial port"""
+        if not self.serial_port or not self.serial_port.is_open:
+            self.terminal.append("Not connected to any port")
             return
 
-        fig, axes = plt.subplots(4, 4, figsize=(15, 15))
-        timestamps = np.linspace(0, 10, len(self.test_data[0]))
+        try:
+            # Send test message
+            test_msg = f"TEST_{random.randint(1000, 9999)}\n"
+            self.terminal.append(f"SENDING: {test_msg.strip()}")
+            self.serial_port.write(test_msg.encode())
 
-        for i in range(4):
-            for j in range(4):
-                sensor_idx = i * 4 + j
-                axes[i, j].plot(timestamps, self.test_data[sensor_idx])
-                axes[i, j].set_title(f'Sensor {sensor_idx + 1}')
-                axes[i, j].grid(True)
+            if not continuous and self.continuous_cb.isChecked():
+                self.send_timer.start(1000)  # Start continuous sending
+            elif continuous and not self.continuous_cb.isChecked():
+                self.send_timer.stop()  # Stop continuous sending
 
-        plt.tight_layout()
-        plt.show()
+        except Exception as e:
+            self.terminal.append(f"Send error: {str(e)}")
+            self.send_timer.stop()
 
 
 def main():
-    app = QApplication([])
-    window = SensorDebugGUI()
+    app = QApplication(sys.argv)
+    window = SerialPortTester()
     window.show()
+
+    # Show instructions
+    QMessageBox.information(window, "Virtual Port Setup",
+                            "To use virtual ports:\n\n"
+                            "1. Windows: Install COM0COM and create a pair\n"
+                            "2. Linux/Mac: Run 'socat -d -d pty,raw,echo=0 pty,raw,echo=0'\n\n"
+                            "Enter the port manually if it's not showing in the list.\n"
+                            "Common formats:\n"
+                            "- Windows: COM1, COM2, etc.\n"
+                            "- Linux: /dev/ttyS0, /dev/pts/1, etc.\n"
+                            "- Mac: /dev/tty.usbserial, /dev/pts/1, etc.")
+
     app.exec_()
 
+
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"Application error: {str(e)}")
-        sys.exit(1)
+    main()
+=======
+import serial
+import time
+import random
+import math
+import argparse
+
+
+class SensorSimulator:
+    def __init__(self, port='/tmp/tty.virtual1', baud=9600):
+        self.port = port
+        self.baud = baud
+        self.serial = None
+        self.timestamp = 0
+
+        # Base values for each sensor
+        self.base_values = [
+            450,  # S1 base ~450
+            150,  # S2 base ~150
+            190,  # S3 base ~190
+            240,  # S4 base ~240
+            265,  # S5 base ~265
+            290,  # S6 base ~290
+            315,  # S7 base ~315
+            330,  # S8 base ~330
+            330,  # S9 base ~330
+            350  # S10 base ~350
+        ]
+
+        # Variation ranges for each sensor
+        self.variations = [10] * 10  # Each sensor varies by ±10 units
+
+    def connect(self):
+        try:
+            self.serial = serial.Serial(self.port, self.baud)
+            print(f"Connected to {self.port} at {self.baud} baud")
+            return True
+        except Exception as e:
+            print(f"Connection error: {str(e)}")
+            return False
+
+    def generate_sensor_data(self):
+        """Generate simulated sensor readings"""
+        data = []
+        for i, base in enumerate(self.base_values):
+            # Add some random variation and a sine wave component
+            variation = random.uniform(-self.variations[i], self.variations[i])
+            sine_component = math.sin(self.timestamp / 1000.0) * 5  # 5 unit amplitude
+            value = base + variation + sine_component
+            value = max(0, min(1023, int(value)))  # Clamp to 0-1023
+            data.append(value)
+        return data
+
+    def send_data(self):
+        """Send one packet of sensor data"""
+        sensor_values = self.generate_sensor_data()
+
+        # Format: START,timestamp,S1:val,S2:val,...,S10:val,END
+        packet = f"START,{self.timestamp}"
+
+        for i, value in enumerate(sensor_values, 1):
+            packet += f",S{i}:{value}"
+
+        packet += ",END\n"
+
+        try:
+            self.serial.write(packet.encode())
+            print(f"Sent: {packet.strip()}")
+        except Exception as e:
+            print(f"Send error: {str(e)}")
+
+    def run(self, interval=0.2):
+        """Run the simulator"""
+        if not self.connect():
+            return
+
+        print("Starting sensor simulation. Press Ctrl+C to stop.")
+
+        try:
+            while True:
+                self.send_data()
+                time.sleep(interval)
+                self.timestamp += 200  # Increment timestamp by 200ms
+
+        except KeyboardInterrupt:
+            print("\nSimulation stopped by user")
+        finally:
+            if self.serial:
+                self.serial.close()
+                print("Serial port closed")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Sensor Data Simulator')
+    parser.add_argument('--port', default='/tmp/tty.virtual1', help='Serial port to use')
+    parser.add_argument('--baud', type=int, default=9600, help='Baud rate')
+    parser.add_argument('--interval', type=float, default=0.2, help='Data send interval in seconds')
+
+    args = parser.parse_args()
+
+    simulator = SensorSimulator(port=args.port, baud=args.baud)
+    simulator.run(interval=args.interval)
+>>>>>>> Stashed changes
