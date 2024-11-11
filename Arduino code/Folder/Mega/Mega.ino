@@ -20,7 +20,7 @@ int currentBitIndex = 0;      // Current position in pattern
 bool isTransmitting = false;  // Pattern state
 unsigned long lastCycleTime = 0;  // For pattern timing
 unsigned long lastSensorTime = 0;  // For sensor timing
-const int SENSOR_INTERVAL = 50;   // Sensor reading interval (ms)
+const int SENSOR_INTERVAL = 25;   // Sensor reading interval (ms)
 
 // Initialize PWM controller
 Adafruit_PWMServoDriver fanController = Adafruit_PWMServoDriver(0x40);
