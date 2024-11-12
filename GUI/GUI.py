@@ -7,12 +7,15 @@ from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QGridLayout, QPushButton, QLabel,
                              QComboBox, QTextEdit, QFrame, QMessageBox,
-                             QDialog, QLineEdit, QGroupBox, QSpinBox)
+                             QDialog, QLineEdit, QGroupBox, QSpinBox, QProgressBar)
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QPalette
 import pyqtgraph as pg
 import random
 from scipy.signal import find_peaks
+import os
+import csv
+from datetime import datetime
 import numpy as np
 
 TEST_MODE = False
@@ -319,6 +322,9 @@ class SensorArrayGUI(QMainWindow):
         self.setup_bit_detectors()
         self.setup_ui()
 
+    def show_experiment_automation(self):
+        dialog = ExperimentAutomationDialog(self)
+        dialog.exec_()
     def setup_ui(self):
         # Set plot configs
         pg.setConfigOption('background', 'w')
@@ -329,11 +335,15 @@ class SensorArrayGUI(QMainWindow):
         self.setCentralWidget(main_widget)
         main_layout = QHBoxLayout(main_widget)
 
+
         # Left panel for fan controls
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
 
         # Add fan control panel
+        experiment_btn = QPushButton("Experiment Automation")
+        experiment_btn.clicked.connect(self.show_experiment_automation)
+        left_layout.addWidget(experiment_btn)
         fan_panel = self.create_fan_panel()
         left_layout.addWidget(fan_panel)
 
@@ -1264,6 +1274,471 @@ class BitDetector:
         return result
 
 
+class ExperimentAutomationDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent = parent
+        self.setWindowTitle("Pattern Transmission Experiment Automation")
+        self.setMinimumWidth(600)
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout()
+
+        # Experiment Name
+        name_layout = QHBoxLayout()
+        name_layout.addWidget(QLabel("Experiment Name:"))
+        self.experiment_name = QLineEdit()
+        self.experiment_name.setPlaceholderText("Enter experiment name")
+        name_layout.addWidget(self.experiment_name)
+        layout.addLayout(name_layout)
+
+        # Pattern Generation Group
+        pattern_group = QGroupBox("Pattern Generation")
+        pattern_layout = QVBoxLayout()
+
+        # Pattern input method selection
+        self.pattern_method = QComboBox()
+        self.pattern_method.addItems([
+            "Manual Patterns",
+            "Random Patterns",
+            "Alternating Patterns",
+            "All 1s",
+            "All 0s"
+        ])
+        self.pattern_method.currentTextChanged.connect(self.update_pattern_inputs)
+        pattern_layout.addWidget(QLabel("Pattern Generation Method:"))
+        pattern_layout.addWidget(self.pattern_method)
+
+        # Manual pattern input
+        self.manual_patterns = QTextEdit()
+        self.manual_patterns.setPlaceholderText("Enter binary patterns (one per line)\nExample:\n1010\n1100\n0011")
+        self.manual_patterns.setMaximumHeight(100)
+        pattern_layout.addWidget(self.manual_patterns)
+
+        # Random pattern settings
+        random_settings = QHBoxLayout()
+        self.random_length = QSpinBox()
+        self.random_length.setRange(1, 32)
+        self.random_length.setValue(8)
+        self.random_count = QSpinBox()
+        self.random_count.setRange(1, 100)
+        self.random_count.setValue(10)
+        random_settings.addWidget(QLabel("Length:"))
+        random_settings.addWidget(self.random_length)
+        random_settings.addWidget(QLabel("Number of Patterns:"))
+        random_settings.addWidget(self.random_count)
+        pattern_layout.addLayout(random_settings)
+
+        pattern_group.setLayout(pattern_layout)
+        layout.addWidget(pattern_group)
+
+        # Timing Settings Group
+        timing_group = QGroupBox("Timing Settings")
+        timing_layout = QGridLayout()
+
+        # Cycle duration (time per bit)
+        timing_layout.addWidget(QLabel("Cycle Duration (ms):"), 0, 0)
+        self.cycle_duration = QSpinBox()
+        self.cycle_duration.setRange(100, 10000)
+        self.cycle_duration.setValue(1000)
+        self.cycle_duration.setSingleStep(100)
+        timing_layout.addWidget(self.cycle_duration, 0, 1)
+
+        # Gap between patterns
+        timing_layout.addWidget(QLabel("Gap Between Patterns (s):"), 1, 0)
+        self.pattern_gap = QSpinBox()
+        self.pattern_gap.setRange(1, 60)
+        self.pattern_gap.setValue(5)
+        timing_layout.addWidget(self.pattern_gap, 1, 1)
+
+        timing_group.setLayout(timing_layout)
+        layout.addWidget(timing_group)
+
+        # Detection Settings Group
+        detection_group = QGroupBox("Detection Settings")
+        detection_layout = QGridLayout()
+
+        # Detection threshold
+        detection_layout.addWidget(QLabel("Detection Threshold:"), 0, 0)
+        self.detection_threshold = QSpinBox()
+        self.detection_threshold.setRange(0, 1023)
+        self.detection_threshold.setValue(500)
+        detection_layout.addWidget(self.detection_threshold, 0, 1)
+
+        # Number of repetitions
+        detection_layout.addWidget(QLabel("Repetitions per Pattern:"), 1, 0)
+        self.repetitions = QSpinBox()
+        self.repetitions.setRange(1, 100)
+        self.repetitions.setValue(5)
+        detection_layout.addWidget(self.repetitions, 1, 1)
+
+        detection_group.setLayout(detection_layout)
+        layout.addWidget(detection_group)
+
+        # Progress Display
+        progress_group = QGroupBox("Progress")
+        progress_layout = QVBoxLayout()
+        self.progress_bar = QProgressBar()
+        self.status_label = QLabel("Ready")
+        self.current_pattern_label = QLabel("Current Pattern: None")
+        progress_layout.addWidget(self.progress_bar)
+        progress_layout.addWidget(self.status_label)
+        progress_layout.addWidget(self.current_pattern_label)
+        progress_group.setLayout(progress_layout)
+        layout.addWidget(progress_group)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.start_button = QPushButton("Start Experiment")
+        self.start_button.clicked.connect(self.start_experiment)
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.clicked.connect(self.stop_experiment)
+        self.stop_button.setEnabled(False)
+        button_layout.addWidget(self.start_button)
+        button_layout.addWidget(self.stop_button)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+        self.update_pattern_inputs()
+
+    def update_pattern_inputs(self):
+        """Show/hide relevant pattern input controls based on selected method"""
+        method = self.pattern_method.currentText()
+        self.manual_patterns.setVisible(method == "Manual Patterns")
+        self.random_length.setEnabled(method == "Random Patterns")
+        self.random_count.setEnabled(method == "Random Patterns")
+
+    def generate_patterns(self):
+        """Generate patterns based on selected method"""
+        method = self.pattern_method.currentText()
+        patterns = []
+
+        if method == "Manual Patterns":
+            patterns = [p.strip() for p in self.manual_patterns.toPlainText().split('\n') if p.strip()]
+        elif method == "Random Patterns":
+            for _ in range(self.random_count.value()):
+                pattern = ''.join(random.choice(['0', '1']) for _ in range(self.random_length.value()))
+                patterns.append(pattern)
+        elif method == "Alternating Patterns":
+            length = 8  # Default length for alternating patterns
+            patterns = ['10' * (length // 2), '01' * (length // 2)]
+        elif method == "All 1s":
+            patterns = ['1' * 8]  # 8-bit pattern of all 1s
+        elif method == "All 0s":
+            patterns = ['0' * 8]  # 8-bit pattern of all 0s
+
+        return patterns
+
+    def start_experiment(self):
+        if not self.validate_inputs():
+            return
+
+        self.experiment_running = True
+        self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+
+        # Create experiment data directory if it doesn't exist
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.experiment_dir = f"experiment_data/{self.experiment_name.text()}_{timestamp}"
+        os.makedirs(self.experiment_dir, exist_ok=True)
+
+        # Generate patterns and create experiment sequence
+        self.patterns = self.generate_patterns()
+        self.total_experiments = len(self.patterns) * self.repetitions.value()
+        self.progress_bar.setMaximum(self.total_experiments)
+        self.current_experiment = 0
+
+        # Create experiment log file
+        self.log_file = f"{self.experiment_dir}/experiment_log.csv"
+        with open(self.log_file, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow([
+                'Timestamp',
+                'Pattern',
+                'Repetition',
+                'Cycle_Duration_ms',
+                'Detection_Threshold',
+                'Sensor_ID',
+                'Detected_Pattern',
+                'Bit_Errors',
+                'BER'
+            ])
+
+        # Start experiment timer
+        self.experiment_timer = QTimer()
+        self.experiment_timer.timeout.connect(self.run_next_pattern)
+        self.experiment_timer.start(100)
+
+    def run_next_pattern(self):
+        if not self.experiment_running:
+            return
+
+        if self.current_experiment >= self.total_experiments:
+            self.experiment_complete()
+            return
+
+        pattern_index = self.current_experiment // self.repetitions.value()
+        repetition = self.current_experiment % self.repetitions.value() + 1
+        current_pattern = self.patterns[pattern_index]
+
+        # Update status display
+        self.status_label.setText(
+            f"Running pattern {pattern_index + 1}/{len(self.patterns)}, "
+            f"Repetition {repetition}/{self.repetitions.value()}"
+        )
+        self.current_pattern_label.setText(f"Current Pattern: {current_pattern}")
+
+        # Configure and start pattern transmission
+        try:
+            # Set cycle duration
+            self.parent.cycle_duration.setValue(self.cycle_duration.value())
+
+            # Set pattern and start transmission
+            self.parent.pattern_input.setText(current_pattern)
+            self.parent.start_spray_pattern()
+
+            # Create data collection timer
+            collection_duration = len(current_pattern) * self.cycle_duration.value() / 1000
+            QTimer.singleShot(int(collection_duration * 1000 + 1000), self.pattern_complete)
+
+        except Exception as e:
+            self.status_label.setText(f"Error: {str(e)}")
+            self.stop_experiment()
+
+    def pattern_complete(self):
+        """Called when a pattern transmission is complete"""
+        try:
+            # Stop spray pattern
+            self.parent.stop_spray_pattern()
+
+            # Calculate detection results for each sensor
+            pattern_index = self.current_experiment // self.repetitions.value()
+            repetition = self.current_experiment % self.repetitions.value() + 1
+            transmitted_pattern = self.patterns[pattern_index]
+
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # Analyze results for each sensor
+            for sensor_id in range(10):
+                detected_bits = self.analyze_sensor_data(sensor_id, len(transmitted_pattern))
+                detected_pattern = ''.join(map(str, detected_bits))
+                bit_errors = sum(t != d for t, d in zip(transmitted_pattern, detected_pattern))
+                ber = bit_errors / len(transmitted_pattern)
+
+                # Log results
+                with open(self.log_file, 'a', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow([
+                        timestamp,
+                        transmitted_pattern,
+                        repetition,
+                        self.cycle_duration.value(),
+                        self.detection_threshold.value(),
+                        sensor_id,
+                        detected_pattern,
+                        bit_errors,
+                        ber
+                    ])
+
+            # Wait before next pattern
+            QTimer.singleShot(self.pattern_gap.value() * 1000, self.advance_experiment)
+
+        except Exception as e:
+            self.status_label.setText(f"Error in pattern completion: {str(e)}")
+            self.stop_experiment()
+
+    def analyze_sensor_data(self, sensor_id, pattern_length):
+        """Analyze sensor data to detect bits"""
+        if not hasattr(self.parent, 'sensor_plots'):
+            return ['0'] * pattern_length
+
+        plot = self.parent.sensor_plots[sensor_id]
+        if not plot['data']['y']:
+            return ['0'] * pattern_length
+
+        # Get recent data corresponding to pattern duration
+        cycle_duration = self.cycle_duration.value() / 1000  # Convert to seconds
+        total_duration = cycle_duration * pattern_length
+
+        recent_data = []
+        current_time = time.time() - self.parent.start_time
+
+        for x, y in zip(plot['data']['x'], plot['data']['y']):
+            if current_time - total_duration <= x <= current_time:
+                recent_data.append(y)
+
+        if not recent_data:
+            return ['0'] * pattern_length
+
+        # Split data into segments for each bit
+        samples_per_bit = len(recent_data) // pattern_length
+        detected_bits = []
+
+        for i in range(pattern_length):
+            start_idx = i * samples_per_bit
+            end_idx = (i + 1) * samples_per_bit
+            segment = recent_data[start_idx:end_idx]
+
+            # Detect bit based on maximum value in segment
+            max_value = max(segment) if segment else 0
+            detected_bits.append('1' if max_value >= self.detection_threshold.value() else '0')
+
+        return detected_bits
+
+    def advance_experiment(self):
+        """Advance to next experiment"""
+        self.current_experiment += 1
+        self.progress_bar.setValue(self.current_experiment)
+        self.run_next_pattern()
+
+    def experiment_complete(self):
+        """Called when all experiments are complete"""
+        self.experiment_running = False
+        self.experiment_timer.stop()
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.status_label.setText("Experiment complete")
+
+        # Generate summary report
+        self.generate_summary_report()
+
+        QMessageBox.information(self, "Complete",
+                                "Experiment sequence completed successfully.\n"
+                                f"Results saved in {self.experiment_dir}")
+
+    def generate_summary_report(self):
+        """Generate summary report of experiment results"""
+        try:
+            summary_file = f"{self.experiment_dir}/summary_report.txt"
+            with open(summary_file, 'w') as f:
+                f.write(f"Experiment Summary\n")
+                f.write(f"=================\n\n")
+                f.write(f"Experiment Name: {self.experiment_name.text()}\n")
+                f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+                # Read results from log file
+                results = pd.read_csv(self.log_file)
+
+                # Overall statistics
+                f.write("Overall Statistics:\n")
+                f.write(f"Total Patterns: {len(self.patterns)}\n")
+                f.write(f"Repetitions per Pattern: {self.repetitions.value()}\n")
+                f.write(f"Average BER: {results['BER'].mean():.4f}\n")
+                f.write(f"Cycle Duration: {self.cycle_duration.value()} ms\n")
+                f.write(f"Detection Threshold: {self.detection_threshold.value()}\n\n")
+
+                # Per-pattern statistics
+                f.write("Per-Pattern Statistics:\n")
+                pattern_groups = results.groupby('Pattern')
+                for pattern, group in pattern_groups:
+                    f.write(f"\nPattern: {pattern}\n")
+                    f.write(f"  Average BER: {group['BER'].mean():.4f}\n")
+                    f.write(f"  Best BER: {group['BER'].min():.4f}\n")
+                    f.write(f"  Worst BER: {group['BER'].max():.4f}\n")
+
+                # Per-sensor statistics
+                f.write("\nPer-Sensor Statistics:\n")
+                for sensor_id in range(10):
+                    sensor_results = results[results['Sensor_ID'] == sensor_id]
+                    if not sensor_results.empty:
+                        f.write(f"\nSensor {sensor_id}:\n")
+                        f.write(f"  Average BER: {sensor_results['BER'].mean():.4f}\n")
+                        f.write(f"  Best BER: {sensor_results['BER'].min():.4f}\n")
+                        f.write(f"  Worst BER: {sensor_results['BER'].max():.4f}\n")
+                        f.write(f"  Successfully Detected Patterns: "
+                                f"{(sensor_results['BER'] == 0).sum()}\n")
+
+                # Generate plots
+                self.generate_visualization_plots(results)
+
+        except Exception as e:
+            self.parent.log_terminal.append(f"Error generating summary report: {str(e)}")
+
+    def generate_visualization_plots(self, results):
+        """Generate visualization plots for the experiment results"""
+        try:
+            # Create plots directory
+            plots_dir = f"{self.experiment_dir}/plots"
+            os.makedirs(plots_dir, exist_ok=True)
+
+            # BER by sensor plot
+            plt.figure(figsize=(10, 6))
+            sns.boxplot(x='Sensor_ID', y='BER', data=results)
+            plt.title('Bit Error Rate Distribution by Sensor')
+            plt.xlabel('Sensor ID')
+            plt.ylabel('Bit Error Rate')
+            plt.savefig(f"{plots_dir}/ber_by_sensor.png")
+            plt.close()
+
+            # BER by pattern plot
+            plt.figure(figsize=(12, 6))
+            pattern_ber = results.groupby('Pattern')['BER'].mean().reset_index()
+            sns.barplot(x='Pattern', y='BER', data=pattern_ber)
+            plt.title('Average Bit Error Rate by Pattern')
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.savefig(f"{plots_dir}/ber_by_pattern.png")
+            plt.close()
+
+            # Success rate heatmap
+            success_matrix = np.zeros((10, len(self.patterns)))
+            for i, pattern in enumerate(self.patterns):
+                for sensor in range(10):
+                    mask = (results['Pattern'] == pattern) & (results['Sensor_ID'] == sensor)
+                    success_rate = (results[mask]['BER'] == 0).mean()
+                    success_matrix[sensor, i] = success_rate
+
+            plt.figure(figsize=(12, 8))
+            sns.heatmap(success_matrix,
+                        xticklabels=self.patterns,
+                        yticklabels=range(10),
+                        cmap='YlOrRd',
+                        annot=True,
+                        fmt='.2f')
+            plt.title('Pattern Detection Success Rate by Sensor')
+            plt.xlabel('Pattern')
+            plt.ylabel('Sensor ID')
+            plt.tight_layout()
+            plt.savefig(f"{plots_dir}/success_rate_heatmap.png")
+            plt.close()
+
+        except Exception as e:
+            self.parent.log_terminal.append(f"Error generating visualization plots: {str(e)}")
+
+    def validate_inputs(self):
+        """Validate all input parameters"""
+        if not self.experiment_name.text().strip():
+            QMessageBox.warning(self, "Invalid Input", "Please enter an experiment name")
+            return False
+
+        if self.pattern_method.currentText() == "Manual Patterns":
+            patterns = self.manual_patterns.toPlainText().strip().split('\n')
+            if not patterns:
+                QMessageBox.warning(self, "Invalid Input", "Please enter at least one pattern")
+                return False
+
+            for pattern in patterns:
+                if not all(c in '01' for c in pattern):
+                    QMessageBox.warning(self, "Invalid Input",
+                                        f"Invalid pattern: {pattern}\nUse only 0s and 1s")
+                    return False
+
+        return True
+
+    def stop_experiment(self):
+        """Stop the current experiment"""
+        self.experiment_running = False
+        if hasattr(self, 'experiment_timer'):
+            self.experiment_timer.stop()
+
+        # Stop any ongoing pattern transmission
+        if self.parent:
+            self.parent.stop_spray_pattern()
+
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.status_label.setText("Experiment stopped")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
