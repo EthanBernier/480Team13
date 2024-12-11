@@ -300,7 +300,7 @@ class SensorArrayGUI(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Fan Array Control Interface v.1.00x`")
+        self.setWindowTitle("Fan Array Control Interface v.1.01x")
         self.setGeometry(100, 100, 1600, 1000)
 
         # Initialize variables first
@@ -308,6 +308,15 @@ class SensorArrayGUI(QMainWindow):
         self.sensor_serial = None
         self.pattern_delay = 0.1
         self.start_time = time.time()
+        self.sensor_plots = []
+
+        # Initialize threshold spinboxes first
+        self.threshold_spins = {}
+        for i in range(32):
+            spin = QSpinBox()
+            spin.setRange(0, 1023)
+            spin.setValue(350)  # Default value
+            self.threshold_spins[i] = spin
 
         # Initialize detection settings before creating plots
         self.threshold_spin = QSpinBox()
@@ -324,9 +333,12 @@ class SensorArrayGUI(QMainWindow):
 
         # In __init__
         self.sensor_buffers = {i: [] for i in range(32)}  # Changed from 10 to 32
-        self.SMOOTHING_WINDOW = 3
-        self.SMOOTHED_SENSORS = set(range(0, 32))  # Second multiplexer sensors are smoothed
+        self.SMOOTHING_WINDOW = 10
+        self.SMOOTHED_SENSORS = set(range(0, 32))  # Both multiplexer sensors are smoothed
         self.bit_detectors = {}
+        self.sensor_timer = QTimer()
+        self.sensor_timer.timeout.connect(self.update_sensor_data)
+        self.sensor_timer.start(50)  # Poll every 50ms
         self.setup_bit_detectors()
         self.setup_ui()
 
@@ -353,7 +365,7 @@ class SensorArrayGUI(QMainWindow):
         experiment_btn.clicked.connect(self.show_experiment_automation)
         left_layout.addWidget(experiment_btn)
 
-        #record data
+        # record data
         recording_panel = self.create_recording_panel()
         left_layout.addWidget(recording_panel)
 
@@ -382,8 +394,7 @@ class SensorArrayGUI(QMainWindow):
 
         # Add detection panel
         detection_panel = self.create_detection_panel()
-        left_layout.addWidget(detection_panel)
-
+        #left_layout.addWidget(detection_panel)
 
         # Create sensor plots list before creating tabs
         self.sensor_plots = []
@@ -392,7 +403,7 @@ class SensorArrayGUI(QMainWindow):
         self.tab_widget = QTabWidget()
         self.tab_widget.addTab(self.create_mux_panel(0), "Multiplexer 1 (S1-S16)")
         self.tab_widget.addTab(self.create_mux_panel(1), "Multiplexer 2 (S17-S32)")
-
+        self.tab_widget.addTab(detection_panel, "Threshold Settings")
         # Add panels to main layout
         main_layout.addWidget(left_panel, stretch=1)
         main_layout.addWidget(self.tab_widget, stretch=2)
@@ -404,7 +415,7 @@ class SensorArrayGUI(QMainWindow):
 
         self.pattern_timer = QTimer()
         self.pattern_timer.timeout.connect(self.update_fan_pattern)
-        self.pattern_timer.start(5000)
+        self.pattern_timer.start(1000)
 
         # Log startup
         self.log_terminal.append("Application initialized")
@@ -413,6 +424,15 @@ class SensorArrayGUI(QMainWindow):
         """Calculate moving average of the last n values"""
         return sum(values) / len(values) if values else 0
 
+    def update_sensor_threshold(self, sensor_index, value):
+        """Update threshold for a specific sensor"""
+        try:
+            plot = self.sensor_plots[sensor_index]
+            plot['threshold_line'].setPos(value)
+            if hasattr(self, 'bit_detectors') and sensor_index in self.bit_detectors:
+                self.bit_detectors[sensor_index].threshold = value
+        except Exception as e:
+            self.log_terminal.append(f"Error updating threshold for sensor {sensor_index + 1}: {str(e)}")
     def create_recording_panel(self):
         """Create a panel for quick data recording"""
         recording_panel = QFrame()
@@ -435,6 +455,36 @@ class SensorArrayGUI(QMainWindow):
 
         return recording_panel
 
+    def calculate_auto_threshold_mux(self, mux_index):
+        """Calculate thresholds automatically for one multiplexer"""
+        start_idx = mux_index * 16
+        end_idx = start_idx + 16
+
+        for i in range(start_idx, end_idx):
+            plot = self.sensor_plots[i]
+            if plot['data']['y']:
+                # Calculate threshold based on data
+                values = plot['data']['y']
+                mean = np.mean(values)
+                std = np.std(values)
+                threshold = int(mean + 2 * std)  # 2 sigma threshold
+
+                # Update the spinbox and threshold line
+                self.threshold_spins[i].setValue(threshold)
+
+                # Log the adjustment
+                self.log_terminal.append(f"Auto threshold S{i + 1}: {threshold}")
+
+    def calculate_auto_threshold_all(self):
+        """Calculate thresholds automatically for all sensors"""
+        for i in range(32):
+            plot = self.sensor_plots[i]
+            if plot['data']['y']:
+                values = plot['data']['y']
+                mean = np.mean(values)
+                std = np.std(values)
+                threshold = int(mean + 2 * std)
+                self.threshold_spins[i].setValue(threshold)
     def toggle_recording(self):
         """Start or stop data recording"""
         if not hasattr(self, 'recording_active') or not self.recording_active:
@@ -459,8 +509,8 @@ class SensorArrayGUI(QMainWindow):
 
             # Initialize recording variables
             self.recording_active = True
-            self.record_start_time = time.time()
-            self.record_end_time = self.record_start_time + self.record_duration.value()
+            self.recording_start_time = time.time()
+            self.record_end_time = self.recording_start_time + self.record_duration.value()
 
             # Update UI
             self.record_btn.setText("Stop Recording")
@@ -469,39 +519,51 @@ class SensorArrayGUI(QMainWindow):
 
             # Start recording timer
             self.recording_timer = QTimer()
-            self.recording_timer.timeout.connect(self.record_data)
+            self.recording_timer.timeout.connect(self.record_data_point)
             self.recording_timer.start(100)  # Record every 100ms
+
+            # Schedule recording stop
+            QTimer.singleShot(self.record_duration.value() * 1000, self.stop_recording)
 
         except Exception as e:
             self.log_terminal.append(f"Error starting recording: {str(e)}")
             self.stop_recording()
 
-    def record_data(self):
-        """Record current sensor data"""
+    def record_data_point(self):
+        """Record a single data point for all sensors"""
         try:
-            current_time = time.time()
-            elapsed_time = current_time - self.record_start_time
+            if not hasattr(self, 'recording_active') or not self.recording_active:
+                return
 
-            # Check if recording should end
-            if current_time >= self.record_end_time:
+            current_time = datetime.now()
+            elapsed_time = time.time() - self.recording_start_time
+
+            # Check if we've reached the recording duration
+            if elapsed_time >= self.record_duration.value():
                 self.stop_recording()
                 return
 
             # Record data from all sensors
-            for sensor_id in range(32):  # For all 32 sensors
-                if sensor_id < len(self.sensor_plots):
-                    plot = self.sensor_plots[sensor_id]
-                    if plot['data']['y']:
-                        value = plot['data']['y'][-1]  # Get most recent value
-                        self.csv_writer.writerow([
-                            datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
-                            f"{elapsed_time:.3f}",
-                            sensor_id + 1,  # 1-based sensor ID
-                            value
-                        ])
+            for sensor_id, plot in enumerate(self.sensor_plots):
+                if plot['data']['y']:  # Check if we have any data for this sensor
+                    value = plot['data']['y'][-1]  # Get the most recent value
+                    self.csv_writer.writerow([
+                        current_time.strftime("%Y-%m-%d %H:%M:%S.%f"),
+                        f"{elapsed_time:.3f}",
+                        sensor_id + 1,
+                        value
+                    ])
+
+            # Ensure data is written to disk
+            self.data_file.flush()
+
+            # Update progress bar if we have one
+            if hasattr(self, 'progress_bar'):
+                progress = (elapsed_time / self.record_duration.value()) * 100
+                self.progress_bar.setValue(int(progress))
 
         except Exception as e:
-            self.log_terminal.append(f"Error recording data: {str(e)}")
+            self.log_terminal.append(f"Error recording data point: {str(e)}")
             self.stop_recording()
 
     def stop_recording(self):
@@ -509,35 +571,41 @@ class SensorArrayGUI(QMainWindow):
         try:
             if hasattr(self, 'recording_active') and self.recording_active:
                 self.recording_active = False
-                if hasattr(self, 'recording_timer'):
+
+                # Stop the recording timer
+                if hasattr(self, 'recording_timer') and self.recording_timer.isActive():
                     self.recording_timer.stop()
-                if hasattr(self, 'data_file'):
+
+                # Close the data file
+                if hasattr(self, 'data_file') and self.data_file:
                     self.data_file.close()
+                    self.data_file = None
 
                 # Update UI
                 self.record_btn.setText("Record Data")
                 self.record_duration.setEnabled(True)
                 self.log_terminal.append("Recording stopped")
 
+                # Reset progress bar if we have one
+                if hasattr(self, 'progress_bar'):
+                    self.progress_bar.setValue(0)
+
         except Exception as e:
             self.log_terminal.append(f"Error stopping recording: {str(e)}")
+
     def create_mux_panel(self, mux_index):
-        """Create a panel for 16 sensors from one multiplexer"""
+        """Create a panel with corrected threshold lines"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
 
         # Add MUX info header
         header = QHBoxLayout()
         header.addWidget(QLabel(f"Multiplexer {mux_index + 1} Sensors"))
-        if mux_index == 1:
-            header.addWidget(QLabel("(Smoothed)"))
         layout.addLayout(header)
 
-        # Create grid for plots
         plot_grid = QGridLayout()
-        base_sensor = mux_index * 16  # 0 for MUX1, 16 for MUX2
+        base_sensor = mux_index * 16
 
-        # Create 4x4 grid of plots
         for i in range(16):
             row = i // 4
             col = i % 4
@@ -550,24 +618,36 @@ class SensorArrayGUI(QMainWindow):
             plot_widget.setLabel('bottom', 'Time (s)')
             plot_widget.showGrid(x=True, y=True)
 
-            # Configure axes
             for ax in ['left', 'bottom']:
                 plot_widget.getAxis(ax).setPen('k')
                 plot_widget.getAxis(ax).setTextPen('k')
 
-            # Set ranges
             plot_widget.setYRange(0, 1023, padding=0.1)
-            plot_widget.setXRange(-30, 0, padding=0.1)
+            plot_widget.setXRange(0, 10, padding=0.1)
 
-            # Create plot elements
-            curve = plot_widget.plot(pen=pg.mkPen('b', width=2 if mux_index == 1 else 1))
-            threshold_line = plot_widget.addLine(y=self.threshold_spin.value(),
-                                                 pen=pg.mkPen('r', style=Qt.DashLine))
-            peaks_scatter = pg.ScatterPlotItem(pen=None, symbol='o', size=8, brush=pg.mkBrush('g'))
-            crossings_scatter = pg.ScatterPlotItem(pen=None, symbol='x', size=8, brush=pg.mkBrush('r'))
+            # Create main curve with appropriate width
+            curve = plot_widget.plot(pen=pg.mkPen('b', width=2))
 
-            plot_widget.addItem(peaks_scatter)
-            plot_widget.addItem(crossings_scatter)
+            # Create threshold line properly
+            threshold_value = self.threshold_spins[sensor_num].value()
+            threshold_line = pg.InfiniteLine(
+                pos=threshold_value,
+                angle=0,
+                movable=False,
+                pen=pg.mkPen('r', style=Qt.DashLine, width=2)
+            )
+            plot_widget.addItem(threshold_line)
+
+            # Create a more direct connection for threshold updates
+            def make_threshold_updater(line, spin):
+                def update_threshold():
+                    line.setPos(spin.value())
+
+                return update_threshold
+
+            self.threshold_spins[sensor_num].valueChanged.connect(
+                make_threshold_updater(threshold_line, self.threshold_spins[sensor_num])
+            )
 
             plot_grid.addWidget(plot_widget, row, col)
 
@@ -575,48 +655,114 @@ class SensorArrayGUI(QMainWindow):
                 'widget': plot_widget,
                 'curve': curve,
                 'threshold_line': threshold_line,
-                'peaks_scatter': peaks_scatter,
-                'crossings_scatter': crossings_scatter,
-                'data': {'x': [], 'y': []}
+                'data': {'x': [], 'y': []},
+                'start_time': None,
+                'value_buffer': []  # Add buffer for smoothing
             })
 
         layout.addLayout(plot_grid)
 
-        # Add control row at bottom
+        # Control buttons
         control_row = QHBoxLayout()
 
-        # Add auto-scale button
         auto_scale_btn = QPushButton("Auto Scale")
         auto_scale_btn.clicked.connect(lambda: self.auto_scale_mux(mux_index))
         control_row.addWidget(auto_scale_btn)
 
-        # Add reset view button
-        reset_view_btn = QPushButton("Reset View")
+        reset_view_btn = QPushButton("Reset View (10s)")
         reset_view_btn.clicked.connect(lambda: self.reset_mux_view(mux_index))
         control_row.addWidget(reset_view_btn)
+
+        # Window size control
+        window_layout = QHBoxLayout()
+        window_layout.addWidget(QLabel("Window:"))
+
+        window_spin = QSpinBox()
+        window_spin.setRange(1, 60)
+        window_spin.setValue(5)
+        window_spin.setSuffix("s")
+        window_layout.addWidget(window_spin)
+
+        set_window_btn = QPushButton("Set Window")
+        set_window_btn.clicked.connect(
+            lambda: self.set_window_size_mux(mux_index, window_spin.value())
+        )
+        window_layout.addWidget(set_window_btn)
+
+        control_row.addLayout(window_layout)
 
         layout.addLayout(control_row)
         return panel
 
-    def auto_scale_mux(self, mux_index):
-        """Auto-scale all plots for a multiplexer"""
+    def set_window_size_mux(self, mux_index, duration):
+        """Set a fixed window size for all plots in a multiplexer"""
         start_idx = mux_index * 16
         for i in range(16):
             plot = self.sensor_plots[start_idx + i]
-            plot['widget'].enableAutoRange()
+            plot['window_size'] = duration  # Store the window size
+            if len(plot['data']['x']) > 0:
+                latest_time = plot['data']['x'][-1]
+                # Set fixed window size
+                plot['widget'].setXRange(0, duration, padding=0)
+    def quick_view_mux(self, mux_index, duration):
+        """Set view to show last N seconds for all plots in a multiplexer"""
+        start_idx = mux_index * 16
+        for i in range(16):
+            plot = self.sensor_plots[start_idx + i]
+            if len(plot['data']['x']) > 0:
+                latest_time = plot['data']['x'][-1]
+                plot['widget'].setXRange(max(0, latest_time - duration), latest_time)
 
-    def reset_mux_view(self, mux_index):
-        """Reset view for all plots in a multiplexer"""
+    def auto_scale_mux(self, mux_index):
+        """Auto-scale each plot individually based on its own data"""
         start_idx = mux_index * 16
         for i in range(16):
             plot = self.sensor_plots[start_idx + i]
+            if plot['data']['y']:
+                # Get the min and max values for this sensor
+                min_val = min(plot['data']['y'])
+                max_val = max(plot['data']['y'])
+
+                # Calculate range and add 10% padding to the top
+                value_range = max_val - min_val
+                top_padding = value_range * 0.1
+
+                # Set Y range from min value to max value plus 10%
+                plot['widget'].setYRange(
+                    min_val,
+                    max_val + top_padding,
+                    padding=0
+                )
+
+                # Log the adjustment for debugging
+                sensor_num = start_idx + i + 1
+                self.log_terminal.append(
+                    f"Auto-scaled S{sensor_num} - Range: {min_val:.1f} to {max_val:.1f}"
+                )
+
+    def setup_bit_detectors(self):
+        """Initialize bit detectors with individual thresholds"""
+        for i in range(32):
+            threshold = (self.threshold_spins[i].value()
+                         if hasattr(self, 'threshold_spins') and i in self.threshold_spins
+                         else 250)  # Default value
+            self.bit_detectors[i] = BitDetector(threshold=threshold)
+    def reset_mux_view(self, mux_index):
+        """Reset view and remove fixed window size"""
+        start_idx = mux_index * 16
+        for i in range(16):
+            plot = self.sensor_plots[start_idx + i]
+            # Remove fixed window size
+            if 'window_size' in plot:
+                del plot['window_size']
+            # Reset view
             plot['widget'].setYRange(0, 1023, padding=0.1)
             if len(plot['data']['x']) > 0:
                 latest_time = plot['data']['x'][-1]
-                plot['widget'].setXRange(latest_time - 30, latest_time)
+                plot['widget'].setXRange(max(0, latest_time - 10), latest_time)
 
     def update_sensor_data(self):
-        """Update sensor data with improved error handling"""
+        """Update sensor data with improved data format handling"""
         if not self.sensor_serial:
             if not hasattr(self, '_no_serial_logged'):
                 self.log_terminal.append("No sensor serial connection available")
@@ -625,63 +771,45 @@ class SensorArrayGUI(QMainWindow):
 
         try:
             if self.sensor_serial.in_waiting:
-                line = self.sensor_serial.readline().decode().strip()
-                self.log_terminal.append(f"Raw data: {line}")  # Debug line
+                line = self.sensor_serial.readline().decode(errors='ignore').strip()
 
-                try:
-                    if line.startswith("START") and line.endswith("END"):
-                        parts = line.split(',')
+                # Log raw data occasionally for debugging
+                if random.random() < 0.01:  # Log ~1% of data for debugging
+                    self.log_terminal.append(f"Raw data: {line}")
 
-                        # Validate data format
-                        if len(parts) < 4:  # START + timestamp + at least one sensor + END
-                            self.log_terminal.append(f"Invalid data format - not enough parts: {line}")
+                # Check if it's a valid data line (starts with $)
+                if line.startswith('$'):
+                    try:
+                        # Split the data
+                        data_parts = line[1:].split(',')  # Remove $ and split
+
+                        if len(data_parts) < 33:  # timestamp + 32 sensors
+                            self.log_terminal.append(f"Invalid data format (too few parts): {line}")
                             return
 
-                        timestamp = time.time() - self.start_time
+                        # Get timestamp
+                        timestamp = float(data_parts[0]) / 1000.0  # Convert to seconds
 
-                        # Process sensor readings
-                        for part in parts[2:-1]:  # Skip START, timestamp, and END
-                            if ':' in part and part.startswith('S'):
-                                try:
-                                    sensor_str, value_str = part.split(':')
-                                    sensor_num = int(sensor_str.replace('S', '')) - 1  # Convert to 0-based index
-                                    raw_value = float(value_str)
+                        # Process sensors in order (first 16 are MUX1, next 16 are MUX2)
+                        for i in range(32):
+                            try:
+                                value = float(data_parts[i + 1])  # +1 to skip timestamp
+                                self.update_plot(i, timestamp, value)
+                            except ValueError:
+                                self.log_terminal.append(f"Error parsing sensor {i + 1} value: {data_parts[i + 1]}")
+                            except IndexError:
+                                self.log_terminal.append(f"Missing data for sensor {i + 1}")
 
-                                    # Add value to buffer for smoothing
-                                    if sensor_num in self.sensor_buffers:
-                                        self.sensor_buffers[sensor_num].append(raw_value)
-                                        if len(self.sensor_buffers[sensor_num]) > self.SMOOTHING_WINDOW:
-                                            self.sensor_buffers[sensor_num].pop(0)
-
-                                    # Apply smoothing for appropriate sensors
-                                    value = self.smooth_value(self.sensor_buffers[
-                                                                  sensor_num]) if sensor_num in self.SMOOTHED_SENSORS else raw_value
-
-                                    # Update plot if valid sensor number
-                                    if 0 <= sensor_num < len(self.sensor_plots):
-                                        self.update_plot(sensor_num, timestamp, value)
-
-                                        # Log occasionally
-                                        if timestamp % 5 < 0.1:
-                                            if sensor_num in self.SMOOTHED_SENSORS:
-                                                self.log_terminal.append(
-                                                    f"Sensor {sensor_num + 1}: raw={raw_value:.2f}, smoothed={value:.2f}")
-                                            else:
-                                                self.log_terminal.append(f"Sensor {sensor_num + 1}: value={value:.2f}")
-
-                                except ValueError as ve:
-                                    self.log_terminal.append(f"Value error parsing sensor {sensor_str}: {ve}")
-                                except Exception as e:
-                                    self.log_terminal.append(f"Error processing sensor {sensor_str}: {e}")
-
-                    elif not line.startswith("Fan"):  # Ignore fan control messages
-                        self.log_terminal.append(f"Unknown data format: {line}")
-
-                except Exception as e:
-                    self.log_terminal.append(f"Error parsing line: {str(e)}\nLine content: {line}")
+                    except Exception as e:
+                        self.log_terminal.append(f"Error processing data line: {str(e)}")
 
         except Exception as e:
-            self.log_terminal.append(f"Serial read error: {str(e)}")
+            if not hasattr(self, '_serial_errors'):
+                self._serial_errors = set()
+            error_key = str(e)
+            if error_key not in self._serial_errors:
+                self.log_terminal.append(f"Serial read error: {str(e)}")
+                self._serial_errors.add(error_key)
 
     def process_plot_data(self, plot_index):
         """Process plot data with peak detection"""
@@ -810,36 +938,108 @@ class SensorArrayGUI(QMainWindow):
         return sprayer_panel
 
     def create_detection_panel(self):
-        """Create detection settings panel"""
+        """Create detection settings panel with per-sensor thresholds"""
         detection_panel = QFrame()
         detection_panel.setFrameStyle(QFrame.Panel | QFrame.Raised)
         detection_layout = QVBoxLayout(detection_panel)
         detection_layout.addWidget(QLabel("Detection Settings"))
 
-        # Detection controls
-        controls_layout = QGridLayout()
+        # Create tab widget for threshold settings
+        threshold_tabs = QTabWidget()
 
-        # Threshold control
-        controls_layout.addWidget(QLabel("Threshold:"), 0, 0)
-        controls_layout.addWidget(self.threshold_spin, 0, 1)
+        # Create panels for each multiplexer's thresholds
+        for mux_index in range(2):
+            mux_panel = QWidget()
+            mux_layout = QGridLayout()
 
-        # Peak height control
-        controls_layout.addWidget(QLabel("Peak Height:"), 1, 0)
-        controls_layout.addWidget(self.peak_height_spin, 1, 1)
+            # Create threshold controls for each sensor in this multiplexer
+            for i in range(16):
+                sensor_num = mux_index * 16 + i
+                row = i // 4
+                col = i % 4
 
-        # Peak distance control
-        controls_layout.addWidget(QLabel("Peak Distance:"), 2, 0)
-        controls_layout.addWidget(self.peak_distance_spin, 2, 1)
+                # Create group box for each sensor
+                sensor_group = QGroupBox(f"S{sensor_num + 1}")
+                sensor_layout = QVBoxLayout()
 
-        detection_layout.addLayout(controls_layout)
+                # Threshold spinbox
+                spin = QSpinBox()
+                spin.setRange(0, 1023)
+                # Initialize with a value close to the current sensor reading if available
+                if sensor_num in self.sensor_plots and self.sensor_plots[sensor_num]['data']['y']:
+                    current_val = self.sensor_plots[sensor_num]['data']['y'][-1]
+                    spin.setValue(int(current_val * 0.9))  # Set to 90% of current value
+                else:
+                    spin.setValue(500)  # Default value
 
-        # Auto threshold button
-        auto_threshold_btn = QPushButton("Auto Threshold")
-        auto_threshold_btn.clicked.connect(self.calculate_auto_threshold)
-        detection_layout.addWidget(auto_threshold_btn)
+                self.threshold_spins[sensor_num] = spin
+                spin.valueChanged.connect(lambda v, s=sensor_num: self.update_sensor_threshold(s, v))
+                sensor_layout.addWidget(spin)
+
+                sensor_group.setLayout(sensor_layout)
+                mux_layout.addWidget(sensor_group, row, col)
+
+            mux_panel.setLayout(mux_layout)
+            threshold_tabs.addTab(mux_panel, f"MUX{mux_index + 1} Thresholds")
+
+        detection_layout.addWidget(threshold_tabs)
+
+        # Auto threshold controls
+        auto_threshold_layout = QHBoxLayout()
+
+        # Auto threshold for visible MUX
+        auto_visible_btn = QPushButton("Auto Threshold Visible MUX")
+        auto_visible_btn.clicked.connect(lambda: self.calculate_auto_threshold_mux(threshold_tabs.currentIndex()))
+        auto_visible_btn.setToolTip("Set thresholds for currently visible multiplexer based on sensor readings")
+        auto_threshold_layout.addWidget(auto_visible_btn)
+
+        # Auto threshold all
+        auto_all_btn = QPushButton("Auto Threshold All")
+        auto_all_btn.clicked.connect(self.calculate_auto_threshold_all)
+        auto_all_btn.setToolTip("Set thresholds for all sensors based on their readings")
+        auto_threshold_layout.addWidget(auto_all_btn)
+
+        detection_layout.addLayout(auto_threshold_layout)
 
         return detection_panel
 
+    def calculate_auto_threshold_mux(self, mux_index):
+        """Calculate appropriate thresholds for one multiplexer automatically"""
+        start_idx = mux_index * 16
+        end_idx = start_idx + 16
+
+        for i in range(start_idx, end_idx):
+            plot = self.sensor_plots[i]
+            if plot['data']['y']:
+                # Get recent values
+                recent_values = plot['data']['y'][-100:]  # Last 100 readings
+                if recent_values:
+                    mean = np.mean(recent_values)
+                    std = np.std(recent_values)
+
+                    # Set threshold to mean + 1 standard deviation
+                    threshold = int(mean + std)
+
+                    # Update spinbox and threshold line
+                    self.threshold_spins[i].setValue(threshold)
+                    plot['threshold_line'].setPos(threshold)
+
+                    # Log the adjustment
+                    self.log_terminal.append(f"Auto threshold S{i + 1}: {threshold} (mean: {mean:.1f}, std: {std:.1f})")
+
+    def calculate_auto_threshold_all(self):
+        """Calculate appropriate thresholds for all sensors automatically"""
+        for i in range(32):
+            plot = self.sensor_plots[i]
+            if plot['data']['y']:
+                recent_values = plot['data']['y'][-100:]
+                if recent_values:
+                    mean = np.mean(recent_values)
+                    std = np.std(recent_values)
+                    threshold = int(mean + std)
+                    self.threshold_spins[i].setValue(threshold)
+                    plot['threshold_line'].setPos(threshold)
+                    self.log_terminal.append(f"Auto threshold S{i + 1}: {threshold}")
     def update_pattern_delay(self):
         try:
             new_delay = float(self.pattern_delay_input.text())
@@ -860,57 +1060,48 @@ class SensorArrayGUI(QMainWindow):
             self.log_terminal.append(f"Port selection error: {str(e)}")
             QMessageBox.warning(self, "Error", f"Port selection failed: {str(e)}")
 
-    def connect_devices(self, fan_port, sensor_port, fan_baud=9600, sensor_baud=11520):
-        """Improved device connection handling"""
-        # Close existing connections first
+    def connect_devices(self, fan_port, sensor_port, fan_baud=115200, sensor_baud=115200):
+        """Connect to single Arduino handling both fans and sensors"""
+        # Close existing connection if any
         if self.fan_serial:
             try:
                 self.fan_serial.close()
             except:
                 pass
             self.fan_serial = None
+            self.sensor_serial = None  # Clear both since they're the same device
 
-        if self.sensor_serial:
-            try:
-                self.sensor_serial.close()
-            except:
-                pass
-            self.sensor_serial = None
-
-        # Connect to fan controller
+        # Connect to Arduino
         if fan_port and fan_port != "No ports found":
             try:
                 self.fan_serial = serial.Serial(
                     port=fan_port,
                     baudrate=fan_baud,
-                    timeout=0.1,  # 100ms timeout
-                    write_timeout=1
+                    timeout=0.1
                 )
                 time.sleep(2)  # Wait for Arduino reset
-                self.log_terminal.append(f"Connected to fan controller on {fan_port}")
-            except Exception as e:
-                self.log_terminal.append(f"Fan controller connection error: {str(e)}")
-                self.fan_serial = None
-                QMessageBox.warning(self, "Connection Error",
-                                    f"Failed to connect to fan controller: {str(e)}")
+                self.sensor_serial = self.fan_serial  # Use same connection for sensors
+                self.log_terminal.append(f"Connected to Arduino controller on {fan_port}")
 
-        # Connect to sensor controller
-        if sensor_port and sensor_port != "No ports found":
-            try:
-                self.sensor_serial = serial.Serial(
-                    port=sensor_port,
-                    baudrate=sensor_baud,
-                    timeout=0.1,  # 100ms timeout
-                    write_timeout=1
-                )
-                time.sleep(2)  # Wait for Arduino reset
-                self.log_terminal.append(f"Connected to sensor controller on {sensor_port}")
+                # Verify we're receiving data
+                timeout = time.time() + 5  # 5 second timeout
+                data_received = False
+                while time.time() < timeout and not data_received:
+                    if self.fan_serial.in_waiting:
+                        line = self.fan_serial.readline().decode(errors='ignore').strip()
+                        self.log_terminal.append(f"First data received: {line}")
+                        data_received = True
+                    time.sleep(0.1)
+
+                if not data_received:
+                    self.log_terminal.append("Warning: No initial data received")
+
             except Exception as e:
-                self.log_terminal.append(f"Sensor controller connection error: {str(e)}")
+                self.log_terminal.append(f"Controller connection error: {str(e)}")
+                self.fan_serial = None
                 self.sensor_serial = None
                 QMessageBox.warning(self, "Connection Error",
-                                    f"Failed to connect to sensor controller: {str(e)}")
-
+                                    f"Failed to connect to controller: {str(e)}")
     def create_fan_button(self, i, j, fan_num):
         """Create a fan button with proper event handling"""
         btn = QPushButton()
@@ -1029,79 +1220,69 @@ class SensorArrayGUI(QMainWindow):
             self.bit_detectors[i] = BitDetector(threshold=250)
 
     def update_plot(self, plot_index, timestamp, value):
-        """Update plot with check for visible tab"""
+        """Update plot with fixed window size support and proper smoothing"""
         try:
-            # Only update plots if their tab is visible
-            mux_index = plot_index // 16
-            if self.tab_widget.currentIndex() == mux_index:
-                plot = self.sensor_plots[plot_index]
+            plot = self.sensor_plots[plot_index]
 
-                # Store new data point
-                plot['data']['x'].append(timestamp)
-                plot['data']['y'].append(value)
+            # Initialize start_time if not set
+            if plot['start_time'] is None:
+                plot['start_time'] = timestamp
 
-                # Keep last 30 seconds of data
-                current_time = timestamp
-                while plot['data']['x'] and (current_time - plot['data']['x'][0]) > 30:
+            # Calculate relative time from start
+            relative_time = timestamp - plot['start_time']
+
+            # Apply smoothing using the buffer
+            if not hasattr(plot, 'value_buffer'):
+                plot['value_buffer'] = []
+
+            plot['value_buffer'].append(value)
+            if len(plot['value_buffer']) > self.SMOOTHING_WINDOW:
+                plot['value_buffer'].pop(0)
+
+            # Calculate smoothed value
+            if len(plot['value_buffer']) >= 3:  # Only smooth if we have enough data points
+                smoothed_value = sum(plot['value_buffer']) / len(plot['value_buffer'])
+            else:
+                smoothed_value = value
+
+            # Store new data point
+            plot['data']['x'].append(relative_time)
+            plot['data']['y'].append(smoothed_value)
+
+            # If we have a fixed window size, adjust the data storage
+            if 'window_size' in plot and plot['window_size']:
+                window = plot['window_size']
+
+                # Keep only data within the window
+                while len(plot['data']['x']) > 0 and plot['data']['x'][-1] - plot['data']['x'][0] > window:
                     plot['data']['x'].pop(0)
                     plot['data']['y'].pop(0)
 
-                # Update plot data with appropriate styling
-                if plot_index in self.SMOOTHED_SENSORS:
-                    plot['curve'].setData(
-                        plot['data']['x'],
-                        plot['data']['y'],
-                        pen=pg.mkPen('b', width=2)
-                    )
-                else:
-                    plot['curve'].setData(
-                        plot['data']['x'],
-                        plot['data']['y'],
-                        pen=pg.mkPen('b', width=1)
-                    )
+                # Shift all times to keep the window starting at 0
+                if len(plot['data']['x']) > 0:
+                    time_shift = plot['data']['x'][-1] - window
+                    if time_shift > 0:
+                        plot['data']['x'] = [t - time_shift for t in plot['data']['x']]
+                        plot['start_time'] += time_shift
 
-                # Auto-scale Y axis if needed
-                if len(plot['data']['y']) > 0:
-                    ymin = min(plot['data']['y'])
-                    ymax = max(plot['data']['y'])
-                    padding = (ymax - ymin) * (0.15 if plot_index in self.SMOOTHED_SENSORS else 0.1)
-                    if padding == 0:
-                        padding = 0.1 * ymax if ymax != 0 else 1.0
-                    plot['widget'].setYRange(ymin - padding, ymax + padding)
+            # Update main data curve
+            plot['curve'].setData(plot['data']['x'], plot['data']['y'])
 
-                # Update X axis to show moving 30-second window
-                plot['widget'].setXRange(current_time - 30, current_time)
+            # Update threshold line with the correct sensor's threshold value
+            plot['threshold_line'].setPos(self.threshold_spins[plot_index].value())
 
-                # Update threshold line
-                plot['threshold_line'].setValue(self.threshold_spin.value())
+            # If we have a fixed window size, maintain it
+            if 'window_size' in plot and plot['window_size']:
+                plot['widget'].setXRange(0, plot['window_size'], padding=0)
 
-                # Perform bit detection
-                detector = self.bit_detectors[plot_index]
-                bit_detected, detection_time = detector.update(value, timestamp)
-
-                if bit_detected:
-                    self.log_terminal.append(
-                        f"Bit detected on sensor {plot_index + 1} at t={detection_time:.2f}s"
-                    )
-                    # Add visual marker for detection
-                    if not 'detections_scatter' in plot:
-                        plot['detections_scatter'] = pg.ScatterPlotItem(
-                            pen=None,
-                            symbol='t',
-                            size=15,
-                            brush=pg.mkBrush('r')
-                        )
-                        plot['widget'].addItem(plot['detections_scatter'])
-
-                    # Update detection markers
-                    if len(detector.timestamps) > 0:
-                        recent_detections = [
-                            (t, v) for t, v in zip(detector.timestamps, detector.bits)
-                            if timestamp - t <= 30
-                        ]
-                        if recent_detections:
-                            times, values = zip(*recent_detections)
-                            plot['detections_scatter'].setData(times, [self.threshold_spin.value()] * len(times))
+            # Auto-scale Y axis if enabled
+            if plot['widget'].getViewBox().state['autoRange'][1]:
+                if plot['data']['y']:
+                    min_val = min(plot['data']['y'])
+                    max_val = max(plot['data']['y'])
+                    value_range = max_val - min_val
+                    top_padding = value_range * 0.1
+                    plot['widget'].setYRange(min_val, max_val + top_padding, padding=0)
 
         except Exception as e:
             if not hasattr(self, '_plot_errors'):
@@ -1268,7 +1449,7 @@ class SensorArrayGUI(QMainWindow):
             pass
 
     def start_spray_pattern(self):
-        """Start the spray pattern sequence"""
+        """Start the spray pattern sequence with debug output"""
         pattern = self.pattern_input.text()
 
         # Validate pattern
@@ -1281,14 +1462,19 @@ class SensorArrayGUI(QMainWindow):
             return
 
         try:
-            # Send pattern configuration
-            command = f"PATTERN,{pattern}\n"
-            self.fan_serial.write(command.encode())
-
             # Send timing configuration
             cycle_time = self.cycle_duration.value()
-            command = f"CYCLE,{cycle_time}\n"
-            self.fan_serial.write(command.encode())
+            config_command = f"CONFIG,{cycle_time}\n"
+            self.fan_serial.write(config_command.encode())
+            self.log_terminal.append(f"Sent config: {config_command.strip()}")
+
+            # Small delay between commands
+            time.sleep(0.1)
+
+            # Send pattern
+            pattern_command = f"PATTERN,{pattern}\n"
+            self.fan_serial.write(pattern_command.encode())
+            self.log_terminal.append(f"Sent pattern: {pattern_command.strip()}")
 
             # Update UI
             self.start_pattern_btn.setEnabled(False)
@@ -1296,10 +1482,6 @@ class SensorArrayGUI(QMainWindow):
             self.pattern_input.setEnabled(False)
             self.cycle_duration.setEnabled(False)
             self.spray_status.setText("Status: Running Pattern")
-
-            # Log start
-            self.log_terminal.append(f"Started spray pattern: {pattern}")
-            self.log_terminal.append(f"Cycle duration: {cycle_time}ms")
 
         except Exception as e:
             self.log_terminal.append(f"Error starting pattern: {str(e)}")
@@ -1404,15 +1586,21 @@ class SensorArrayGUI(QMainWindow):
 
 
 class BitDetector:
-    def __init__(self, threshold=500, min_gap=10):
+    def __init__(self, threshold=500, min_gap=10, window_size=5):
         self.threshold = threshold
-        self.min_gap = min_gap  # Minimum samples between detections
-        self.last_detection = 0  # Sample count since last detection
-        self.last_state = False  # True if above threshold
-        self.bits = []  # Detected bits
-        self.timestamps = []  # Timestamps of detections
+        self.min_gap = min_gap
+        self.window_size = window_size
+        self.last_detection = 0
+        self.last_state = False
+        self.bits = []
+        self.timestamps = []
         self.samples_since_last = 0
         self.detection_count = 0
+        self.buffer = []  # Buffer for moving average
+        self.baseline = None
+        self.baseline_samples = []
+        self.baseline_window = 50  # Samples to establish baseline
+        self.trigger_threshold = 0.15  # 15% change from baseline triggers detection
 
     def reset(self):
         """Reset the detector state"""
@@ -1422,17 +1610,54 @@ class BitDetector:
         self.timestamps = []
         self.samples_since_last = 0
         self.detection_count = 0
+        self.buffer = []
+        self.baseline = None
+        self.baseline_samples = []
 
-    def update(self, value, timestamp):
-        """Process new sensor value and return (bit_detected, timestamp) if detection occurs"""
+    def calculate_baseline(self, value):
+        """Establish or update the baseline"""
+        self.baseline_samples.append(value)
+        if len(self.baseline_samples) > self.baseline_window:
+            self.baseline_samples.pop(0)
+        self.baseline = sum(self.baseline_samples) / len(self.baseline_samples)
+
+    def smooth_value(self, value):
+        """Apply moving average smoothing"""
+        self.buffer.append(value)
+        if len(self.buffer) > self.window_size:
+            self.buffer.pop(0)
+        return sum(self.buffer) / len(self.buffer)
+
+    def update(self, raw_value, timestamp):
+        """Process new sensor value with improved detection"""
+        # Initialize or update baseline
+        if self.baseline is None or len(self.baseline_samples) < self.baseline_window:
+            self.calculate_baseline(raw_value)
+            return False, None
+
+        # Apply smoothing
+        smoothed_value = self.smooth_value(raw_value)
+
+        # Calculate percentage change from baseline
+        if self.baseline > 0:
+            percent_change = abs(smoothed_value - self.baseline) / self.baseline
+        else:
+            percent_change = 0
+
+        # Update baseline during non-detection periods
+        if percent_change < self.trigger_threshold:
+            self.calculate_baseline(raw_value)
+
         self.samples_since_last += 1
-        current_state = value >= self.threshold
 
-        # Detect falling edge
+        # Detect significant changes
+        current_state = percent_change >= self.trigger_threshold
+
+        # Detect falling edge (spray detection)
         if self.last_state and not current_state and self.samples_since_last >= self.min_gap:
             self.samples_since_last = 0
             self.detection_count += 1
-            self.bits.append(1)  # Record detection
+            self.bits.append(1)
             self.timestamps.append(timestamp)
             self.last_detection = timestamp
             result = (True, timestamp)
@@ -1488,42 +1713,6 @@ class ExperimentAutomationDialog(QDialog):
         config_group.setLayout(config_layout)
         layout.addWidget(config_group)
 
-        # Fan configuration
-        fan_group = QGroupBox("Fan Configuration")
-        fan_layout = QGridLayout()
-
-        # Fan pattern dropdown
-        fan_layout.addWidget(QLabel("Fan Pattern:"), 0, 0)
-        self.fan_pattern = QComboBox()
-        self.fan_pattern.addItems(["Custom", "All On", "All Off", "Alternating"])
-        self.fan_pattern.currentTextChanged.connect(self.on_fan_pattern_changed)
-        fan_layout.addWidget(self.fan_pattern, 0, 1)
-
-        # Fan speed
-        fan_layout.addWidget(QLabel("Fan Speed:"), 1, 0)
-        self.fan_speed = QComboBox()
-        self.fan_speed.addItems(["Off", "Low", "Medium", "High"])
-        fan_layout.addWidget(self.fan_speed, 1, 1)
-
-        # Fan grid label
-        fan_layout.addWidget(QLabel("Custom Fan Selection:"), 2, 0, 1, 2)
-
-        # Custom fan grid for selecting individual fans
-        self.fan_grid = QGridLayout()
-        self.fan_checkboxes = []
-        for i in range(4):
-            row = []
-            for j in range(4):
-                checkbox = QCheckBox(f"Fan {i * 4 + j}")  # Added fan numbers for clarity
-                checkbox.setChecked(True)  # Default all on
-                self.fan_grid.addWidget(checkbox, i, j)
-                row.append(checkbox)
-            self.fan_checkboxes.append(row)
-        fan_layout.addLayout(self.fan_grid, 3, 0, 1, 2)
-
-        fan_group.setLayout(fan_layout)
-        layout.addWidget(fan_group)
-
         # Data collection settings
         data_group = QGroupBox("Data Collection")
         data_layout = QGridLayout()
@@ -1548,14 +1737,18 @@ class ExperimentAutomationDialog(QDialog):
         layout.addWidget(data_group)
 
         # Progress display
-        self.progress_group = QGroupBox("Experiment Progress")
+        progress_group = QGroupBox("Experiment Progress")
         progress_layout = QVBoxLayout()
+
         self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
         progress_layout.addWidget(self.progress_bar)
+
         self.status_label = QLabel("Ready to start")
         progress_layout.addWidget(self.status_label)
-        self.progress_group.setLayout(progress_layout)
-        layout.addWidget(self.progress_group)
+
+        progress_group.setLayout(progress_layout)
+        layout.addWidget(progress_group)
 
         # Control buttons
         button_layout = QHBoxLayout()
@@ -1570,14 +1763,126 @@ class ExperimentAutomationDialog(QDialog):
 
         self.setLayout(layout)
 
-    def on_fan_pattern_changed(self, pattern):
-        """Handle fan pattern selection"""
-        enable_custom = pattern == "Custom"
-        for row in self.fan_checkboxes:
-            for checkbox in row:
-                checkbox.setEnabled(enable_custom)
-                if not enable_custom:
-                    checkbox.setChecked(pattern == "All On")
+    def start_experiment(self):
+        """Start the automated experiment"""
+        try:
+            # Validate inputs
+            pattern = self.pattern_input.text()
+            if not pattern or not all(c in '01' for c in pattern):
+                QMessageBox.warning(self, "Invalid Input", "Pattern must contain only 0s and 1s")
+                return
+
+            if self.cycle_duration.value() < 100:
+                QMessageBox.warning(self, "Invalid Input", "Cycle duration must be at least 100ms")
+                return
+
+            if not self.parent.fan_serial:
+                QMessageBox.warning(self, "Error", "No serial connection available")
+                return
+
+            # Create experiment directory if needed
+            save_dir = self.save_path.text()
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)
+
+            # Setup data file in experiment directory
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.data_filename = f"{save_dir}/experiment_{timestamp}.csv"
+            self.data_file = open(self.data_filename, 'w', newline='')
+            self.csv_writer = csv.writer(self.data_file)
+            self.csv_writer.writerow(['Timestamp', 'Repetition', 'Sensor_ID', 'Value'])
+
+            # Initialize experiment state
+            self.experiment_running = True
+            self.current_repetition = 0
+
+            # Update UI
+            self.start_btn.setEnabled(False)
+            self.stop_btn.setEnabled(True)
+            self.progress_bar.setValue(0)
+            self.status_label.setText("Starting experiment...")
+
+            # Start first repetition
+            self.run_next_repetition()
+
+        except Exception as e:
+            self.parent.log_terminal.append(f"Error starting experiment: {str(e)}")
+            self.stop_experiment()
+
+    def run_next_repetition(self):
+        """Run next repetition of the experiment"""
+        try:
+            if not self.experiment_running:
+                return
+
+            self.current_repetition += 1
+
+            # Check if we've completed all repetitions
+            if self.current_repetition > self.repetitions.value():
+                self.finish_experiment()
+                return
+
+            # Update UI
+            self.status_label.setText(f"Running repetition {self.current_repetition} of {self.repetitions.value()}")
+            self.progress_bar.setValue(((self.current_repetition - 1) * 100) // self.repetitions.value())
+
+            # Get pattern parameters
+            pattern = self.pattern_input.text()
+            cycle_time = self.cycle_duration.value()
+
+            if self.parent.fan_serial:
+                # Send CONFIG command for sprayer
+                self.parent.fan_serial.write(f"CONFIG,{cycle_time}\n".encode())
+                time.sleep(0.1)  # Small delay between commands
+
+                # Send PATTERN command
+                self.parent.fan_serial.write(f"PATTERN,{pattern}\n".encode())
+
+                # Calculate timings
+                pattern_duration = len(pattern) * cycle_time  # Total time for pattern in ms
+                delay_time = self.delay_between.value() * 1000  # Convert to ms
+                total_time = pattern_duration + delay_time
+
+                # Start recording if enabled
+                if self.record_data.isChecked():
+                    self.record_timer = QTimer()
+                    self.record_timer.timeout.connect(self.record_sensor_data)
+                    self.record_timer.start(100)  # Record every 100ms
+
+                # Schedule pattern stop and next repetition
+                QTimer.singleShot(pattern_duration, self.stop_current_pattern)
+                QTimer.singleShot(total_time, self.run_next_repetition)
+
+        except Exception as e:
+            self.parent.log_terminal.append(f"Error in repetition: {str(e)}")
+            self.stop_experiment()
+
+    def record_sensor_data(self):
+        """Record current sensor data"""
+        try:
+            if not hasattr(self, 'data_file') or self.data_file is None:
+                return
+
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+
+            # Record data from all sensors
+            for sensor_id in range(32):
+                if sensor_id < len(self.parent.sensor_plots):
+                    plot = self.parent.sensor_plots[sensor_id]
+                    if plot['data']['y']:
+                        value = plot['data']['y'][-1]
+                        self.csv_writer.writerow([
+                            current_time,
+                            self.current_repetition,
+                            sensor_id + 1,
+                            value
+                        ])
+
+            # Ensure data is written to disk
+            self.data_file.flush()
+
+        except Exception as e:
+            self.parent.log_terminal.append(f"Error recording data: {str(e)}")
 
     def browse_save_location(self):
         """Open file dialog to choose save location"""
@@ -1585,199 +1890,51 @@ class ExperimentAutomationDialog(QDialog):
         if path:
             self.save_path.setText(path)
 
-    def setup_data_recording(self):
-        """Setup data recording for the experiment"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.data_file = open(f"{self.save_path.text()}/experiment_{timestamp}.csv", "w")
-        self.data_file.write("timestamp,repetition,sensor,value\n")
-
-    def start_experiment(self):
-        """Start the automated experiment with debug logging"""
-        self.parent.log_terminal.append("Attempting to start experiment...")
-
-        # Validate inputs
-        if not self.validate_inputs():
-            self.parent.log_terminal.append("Input validation failed")
-            return
-
-        # Check serial connection
-        if not self.parent.fan_serial:
-            self.parent.log_terminal.append("Error: No serial connection")
-            QMessageBox.warning(self, "Error", "No serial connection available")
-            return
-
-        try:
-            self.experiment_running = True
-            self.start_btn.setEnabled(False)
-            self.stop_btn.setEnabled(True)
-            self.progress_bar.setValue(0)
-
-            # Log experiment settings
-            self.parent.log_terminal.append(f"""
-    Experiment settings:
-    - Pattern: {self.pattern_input.text()}
-    - Cycle Duration: {self.cycle_duration.value()}ms
-    - Repetitions: {self.repetitions.value()}
-    - Delay Between: {self.delay_between.value()}s
-    - Fan Pattern: {self.fan_pattern.currentText()}
-    - Fan Speed: {self.fan_speed.currentText()}
-    """)
-
-            # Setup initial fan configuration
-            self.configure_fans()
-            self.parent.log_terminal.append("Fans configured")
-
-            # Reset repetition counter
-            self.current_repetition = 0
-
-            # Start first repetition with explicit call
-            QTimer.singleShot(100, self.run_next_repetition)
-            self.parent.log_terminal.append("First repetition scheduled")
-
-        except Exception as e:
-            self.parent.log_terminal.append(f"Error starting experiment: {str(e)}")
-            self.stop_experiment()
-            QMessageBox.warning(self, "Error", f"Failed to start experiment: {str(e)}")
-
-    def run_next_repetition(self):
-        """Run the next repetition with improved error handling"""
-        try:
-            self.parent.log_terminal.append("Running next repetition...")
-
-            if not self.experiment_running:
-                self.parent.log_terminal.append("Experiment stopped - not running next repetition")
-                return
-
-            if self.current_repetition >= self.repetitions.value():
-                self.parent.log_terminal.append("All repetitions complete")
-                self.finish_experiment()
-                return
-
-            self.current_repetition += 1
-            self.parent.log_terminal.append(f"Starting repetition {self.current_repetition}")
-            self.status_label.setText(f"Running repetition {self.current_repetition} of {self.repetitions.value()}")
-            self.progress_bar.setValue((self.current_repetition - 1) * 100 // self.repetitions.value())
-
-            # Send pattern commands
-            pattern = self.pattern_input.text()
-            cycle_time = self.cycle_duration.value()
-
-            # Log commands being sent
-            self.parent.log_terminal.append(f"Sending pattern command: PATTERN,{pattern}")
-            self.parent.fan_serial.write(f"PATTERN,{pattern}\n".encode())
-
-            self.parent.log_terminal.append(f"Sending cycle command: CYCLE,{cycle_time}")
-            self.parent.fan_serial.write(f"CYCLE,{cycle_time}\n".encode())
-
-            # Calculate timings
-            pattern_time = len(pattern) * cycle_time  # Total time for pattern
-            delay_time = self.delay_between.value() * 1000  # Delay in ms
-            total_time = pattern_time + delay_time
-
-            # Schedule pattern stop and next repetition
-            self.parent.log_terminal.append(f"Scheduling pattern stop in {pattern_time}ms")
-            QTimer.singleShot(pattern_time, lambda: self.stop_current_pattern())
-
-            self.parent.log_terminal.append(f"Scheduling next repetition in {total_time}ms")
-            QTimer.singleShot(total_time, lambda: self.run_next_repetition())
-
-        except Exception as e:
-            self.parent.log_terminal.append(f"Error in run_next_repetition: {str(e)}")
-            self.stop_experiment()
-            QMessageBox.warning(self, "Error", f"Failed during repetition: {str(e)}")
-
-    def validate_inputs(self):
-        """Validate all experiment inputs with detailed feedback"""
-        self.parent.log_terminal.append("Validating inputs...")
-
-        pattern = self.pattern_input.text()
-        if not pattern:
-            self.parent.log_terminal.append("Error: Empty pattern")
-            QMessageBox.warning(self, "Invalid Input", "Pattern cannot be empty")
-            return False
-
-        if not all(c in '01' for c in pattern):
-            self.parent.log_terminal.append("Error: Invalid pattern characters")
-            QMessageBox.warning(self, "Invalid Input", "Pattern must contain only 0s and 1s")
-            return False
-
-        if self.cycle_duration.value() < 100:
-            self.parent.log_terminal.append("Error: Cycle duration too short")
-            QMessageBox.warning(self, "Invalid Input", "Cycle duration must be at least 100ms")
-            return False
-
-        self.parent.log_terminal.append("Input validation passed")
-        return True
-
     def stop_current_pattern(self):
-        """Stop the current pattern with logging"""
-        try:
-            if self.experiment_running and self.parent.fan_serial:
-                self.parent.log_terminal.append("Stopping current pattern")
-                self.parent.fan_serial.write(b"STOP\n")
-                self.parent.log_terminal.append("Pattern stopped")
-        except Exception as e:
-            self.parent.log_terminal.append(f"Error stopping pattern: {str(e)}")
-
-    def configure_fans(self):
-        """Configure fans with logging"""
-        try:
-            pattern = self.fan_pattern.currentText()
-            speed = self.fan_speed.currentIndex()
-            self.parent.log_terminal.append(f"Configuring fans - Pattern: {pattern}, Speed: {speed}")
-
-            if pattern == "Custom":
-                for i in range(4):
-                    for j in range(4):
-                        fan_num = i * 4 + j
-                        if self.fan_checkboxes[i][j].isChecked():
-                            self.parent.queue_fan_command(fan_num, speed)
-                            self.parent.log_terminal.append(f"Setting fan {fan_num} to speed {speed}")
-                        else:
-                            self.parent.queue_fan_command(fan_num, 0)
-                            self.parent.log_terminal.append(f"Turning off fan {fan_num}")
-            else:
-                for fan_num in range(16):
-                    fan_speed = speed if pattern == "All On" else 0
-                    self.parent.queue_fan_command(fan_num, fan_speed)
-                    self.parent.log_terminal.append(f"Setting fan {fan_num} to speed {fan_speed}")
-
-            self.parent.process_fan_commands()
-            self.parent.log_terminal.append("Fan configuration complete")
-        except Exception as e:
-            self.parent.log_terminal.append(f"Error configuring fans: {str(e)}")
+        """Stop only the spray pattern"""
+        if self.experiment_running and self.parent.fan_serial:
+            self.parent.fan_serial.write(b"STOP\n")
 
     def stop_experiment(self):
-        """Stop the current experiment and cleanup"""
+        """Stop the experiment"""
         self.experiment_running = False
+
+        # Stop pattern
+        if self.parent.fan_serial:
+            self.parent.fan_serial.write(b"STOP\n")
+
+        # Stop recording
+        if hasattr(self, 'record_timer') and self.record_timer.isActive():
+            self.record_timer.stop()
+
+        # Close data file
+        if hasattr(self, 'data_file') and self.data_file is not None:
+            self.data_file.close()
+            self.data_file = None
+
+        # Update UI
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.status_label.setText("Experiment stopped")
 
-        # Stop sprayer
-        if self.parent.fan_serial:
-            try:
-                self.parent.fan_serial.write(b"STOP\n")
-                self.parent.log_terminal.append("Experiment stopped - sprayer deactivated")
-            except Exception as e:
-                self.parent.log_terminal.append(f"Error stopping sprayer: {str(e)}")
-
     def finish_experiment(self):
-        """Clean up after experiment completion"""
+        """Complete the experiment"""
         self.experiment_running = False
+
+        # Stop recording
+        if hasattr(self, 'record_timer') and self.record_timer.isActive():
+            self.record_timer.stop()
+
+        # Close data file
+        if hasattr(self, 'data_file') and self.data_file is not None:
+            self.data_file.close()
+            self.data_file = None
+
+        # Update UI
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.progress_bar.setValue(100)
         self.status_label.setText("Experiment completed")
-
-        if hasattr(self, 'data_file'):
-            self.data_file.close()
-
-    def closeEvent(self, event):
-        """Handle dialog close"""
-        if self.experiment_running:
-            self.stop_experiment()
-        event.accept()
 
 
 if __name__ == '__main__':
